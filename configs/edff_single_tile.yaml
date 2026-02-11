@@ -1,63 +1,15 @@
-# EDFF (Euclid Deep Field Fornax) — mock SHINE pipeline configuration
+# EDFF single tile — for quick testing of quadrant resolution + extraction
 #
-# Runs the full constellation pipeline with real S3 file discovery but
-# mock SHINE inference (random shear values). For development and testing.
+# One tile, 2×2 sub-tile grid (4 sub-tiles instead of 16).
+# Uses real S3 data with mock SHINE inference.
 
 field_name: EDFF
 
-# First 48 Q1 MER tile IDs (EDFF region, ~12.1 deg²)
 tile_ids:
   - 102018211
-  - 102018212
-  - 102018213
-  - 102018664
-  - 102018665
-  - 102018666
-  - 102018667
-  - 102018668
-  - 102018669
-  - 102018670
-  - 102018671
-  - 102019122
-  - 102019123
-  - 102019124
-  - 102019125
-  - 102019126
-  - 102019127
-  - 102019128
-  - 102019129
-  - 102019130
-  - 102019131
-  - 102019585
-  - 102019586
-  - 102019587
-  - 102019588
-  - 102019589
-  - 102019590
-  - 102019591
-  - 102019592
-  - 102019593
-  - 102019594
-  - 102019595
-  - 102019596
-  - 102020053
-  - 102020054
-  - 102020055
-  - 102020056
-  - 102020057
-  - 102020058
-  - 102020059
-  - 102020060
-  - 102020061
-  - 102020062
-  - 102020063
-  - 102020064
-  - 102020065
-  - 102020066
-  - 102020527
 
 tiling:
-  sub_tile_grid: [4, 4]
+  sub_tile_grid: [2, 2]
   sub_tile_margin_arcmin: 1.0
 
 data:

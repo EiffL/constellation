@@ -17,6 +17,10 @@ from constellation.discovery import (
     build_quadrant_refs,
     list_mer_catalog,
 )
+from constellation.quadrant_resolver import (
+    QuadrantFootprint,
+    resolve_quadrants_for_subtile,
+)
 from constellation.schemas import QuadrantRef, SkyBounds, SubTileManifest
 from constellation.tiling import SubTile, generate_subtile_grid, get_tile_by_id
 
@@ -78,13 +82,24 @@ def write_manifests_for_tile(
     tile_id: int,
     config: PipelineConfig,
     obs_index: ObservationIndex | None = None,
+    quadrant_index: list[QuadrantFootprint] | None = None,
 ) -> list[str]:
     """Generate and write all sub-tile manifests for one MER tile.
+
+    When ``quadrant_index`` is provided, uses WCS-based spatial filtering
+    to assign only overlapping quadrants to each sub-tile. Otherwise,
+    falls back to the legacy behavior (all quadrants to all sub-tiles
+    with ``quadrant="TBD"``).
+
+    Source IDs are left empty when using the quadrant index — real
+    catalog subsetting happens during extraction.
 
     Args:
         tile_id: MER tile ID to process.
         config: Pipeline configuration.
         obs_index: Pre-built observation index. If None, built from S3.
+        quadrant_index: Pre-built quadrant spatial index. If provided,
+            enables WCS-based spatial filtering.
 
     Returns:
         List of manifest file paths written.
@@ -93,14 +108,6 @@ def write_manifests_for_tile(
     rows, cols = config.tiling.sub_tile_grid
     margin = config.tiling.sub_tile_margin_arcmin
     subtiles = generate_subtile_grid(tile, rows, cols, margin)
-
-    # Build observation index if not provided
-    if obs_index is None:
-        obs_index = build_observation_index(
-            vis_base_uri=config.data.vis_base_uri,
-            s3_region=config.data.s3_region,
-            s3_no_sign_request=config.data.s3_no_sign_request,
-        )
 
     # Find MER catalog for this tile
     catalog_path = list_mer_catalog(
@@ -113,21 +120,43 @@ def write_manifests_for_tile(
         catalog_path = ""
         logger.warning("No MER catalog found for tile %d", tile_id)
 
-    # For the milestone: assign all observations to all sub-tiles.
-    # Production would check WCS sky overlap per quadrant.
-    all_quadrant_refs: list[QuadrantRef] = []
-    for obs_id in obs_index.obs_ids():
-        all_quadrant_refs.extend(build_quadrant_refs(obs_index, obs_id))
+    # Determine quadrant assignment strategy
+    use_spatial_filtering = quadrant_index is not None
+
+    if not use_spatial_filtering:
+        # Legacy fallback: build observation index and assign all quadrants
+        if obs_index is None:
+            obs_index = build_observation_index(
+                vis_base_uri=config.data.vis_base_uri,
+                s3_region=config.data.s3_region,
+                s3_no_sign_request=config.data.s3_no_sign_request,
+            )
+        all_quadrant_refs: list[QuadrantRef] = []
+        for obs_id in obs_index.obs_ids():
+            all_quadrant_refs.extend(build_quadrant_refs(obs_index, obs_id))
 
     manifest_paths = []
     manifest_dir = Path(config.output.manifest_dir) / str(tile_id)
 
     for subtile in subtiles:
-        source_ids, core_source_ids = generate_mock_source_ids(subtile)
+        sky_bounds = _subtile_to_sky_bounds(subtile)
+
+        if use_spatial_filtering:
+            # WCS-based spatial filtering
+            quadrant_refs = resolve_quadrants_for_subtile(
+                quadrant_index, sky_bounds
+            )
+            # Source IDs populated during extraction
+            source_ids: list[int] = []
+            core_source_ids: list[int] = []
+        else:
+            # Legacy: all quadrants, mock source IDs
+            quadrant_refs = all_quadrant_refs
+            source_ids, core_source_ids = generate_mock_source_ids(subtile)
 
         manifest = generate_manifest(
             subtile=subtile,
-            quadrants=all_quadrant_refs,
+            quadrants=quadrant_refs,
             catalog_path=catalog_path,
             source_ids=source_ids,
             core_source_ids=core_source_ids,
@@ -138,6 +167,9 @@ def write_manifests_for_tile(
         manifest_paths.append(str(path))
 
     logger.info(
-        "Wrote %d manifests for tile %d", len(manifest_paths), tile_id
+        "Wrote %d manifests for tile %d (spatial_filtering=%s)",
+        len(manifest_paths),
+        tile_id,
+        use_spatial_filtering,
     )
     return manifest_paths

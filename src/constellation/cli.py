@@ -77,6 +77,56 @@ def prepare(config_yaml: str) -> None:
 @click.option(
     "--config", "config_yaml", required=True, help="Path to pipeline config YAML."
 )
+def extract(config_yaml: str) -> None:
+    """Extract sub-tile data into self-contained directories."""
+    from constellation.discovery import build_observation_index
+    from constellation.extractor import extract_subtile
+    from constellation.manifest import write_manifests_for_tile
+    from constellation.quadrant_resolver import build_quadrant_index
+
+    config = PipelineConfig.from_yaml(config_yaml)
+    obs_index = build_observation_index(
+        vis_base_uri=config.data.vis_base_uri,
+        s3_region=config.data.s3_region,
+        s3_no_sign_request=config.data.s3_no_sign_request,
+    )
+
+    click.echo("Building quadrant index from FITS headers...")
+    quadrant_index = build_quadrant_index(
+        obs_index,
+        s3_anon=config.data.s3_no_sign_request,
+    )
+    click.echo(f"Found {len(quadrant_index)} quadrant footprints.")
+
+    total_manifests = 0
+    all_manifest_paths: list[str] = []
+    for tile_id in config.tile_ids:
+        paths = write_manifests_for_tile(
+            tile_id, config, obs_index, quadrant_index=quadrant_index
+        )
+        all_manifest_paths.extend(paths)
+        total_manifests += len(paths)
+
+    click.echo(f"Generated {total_manifests} manifests. Extracting...")
+
+    for manifest_path in all_manifest_paths:
+        subtile_dir = extract_subtile(
+            manifest_path,
+            extraction_dir=config.output.extraction_dir,
+            s3_anon=config.data.s3_no_sign_request,
+        )
+        click.echo(f"  {subtile_dir}")
+
+    click.echo(
+        f"Extracted {len(all_manifest_paths)} sub-tiles "
+        f"for {len(config.tile_ids)} tiles."
+    )
+
+
+@cli.command()
+@click.option(
+    "--config", "config_yaml", required=True, help="Path to pipeline config YAML."
+)
 @click.argument("manifest_paths", nargs=-1, required=True)
 def infer(config_yaml: str, manifest_paths: tuple[str, ...]) -> None:
     """Run inference on one or more sub-tile manifests."""

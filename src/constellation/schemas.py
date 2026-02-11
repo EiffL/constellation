@@ -26,6 +26,9 @@ class QuadrantRef(BaseModel):
     wgt_path: str
     psf_path: str
     quadrant: str  # HDU name prefix, e.g. "3-4.F"
+    obs_id: str = ""
+    dither: str = ""
+    ccd: str = ""
 
 
 class SubTileManifest(BaseModel):

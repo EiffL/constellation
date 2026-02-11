@@ -26,8 +26,14 @@ except Exception:
 from constellation.catalog_assembler import assemble_catalog, validate_catalog
 from constellation.config import PipelineConfig
 from constellation.discovery import ObservationIndex, build_observation_index
+from constellation.extractor import extract_subtile
 from constellation.manifest import write_manifests_for_tile
 from constellation.mock_shine import run_mock_inference
+from constellation.quadrant_resolver import (
+    build_quadrant_index,
+    quadrant_index_from_dict,
+    quadrant_index_to_dict,
+)
 from constellation.result_writer import write_subtile_result
 
 logger = logging.getLogger(__name__)
@@ -49,10 +55,34 @@ def build_obs_index(config_yaml: str) -> dict:
 
 
 @task(cache=True, cache_version="1")
+def build_quadrant_index_task(
+    config_yaml: str,
+    obs_index_dict: dict,
+) -> list[dict]:
+    """Build the quadrant spatial index by reading WCS from FITS headers.
+
+    Args:
+        config_yaml: Path to the pipeline config YAML.
+        obs_index_dict: Serialized ObservationIndex from build_obs_index.
+
+    Returns:
+        Serialized quadrant index (list of dicts).
+    """
+    config = PipelineConfig.from_yaml(config_yaml)
+    obs_index = ObservationIndex.from_dict(obs_index_dict)
+    index = build_quadrant_index(
+        obs_index,
+        s3_anon=config.data.s3_no_sign_request,
+    )
+    return quadrant_index_to_dict(index)
+
+
+@task(cache=True, cache_version="1")
 def prepare_tile(
     tile_id: int,
     config_yaml: str,
     obs_index_dict: dict,
+    quadrant_index_dict: list[dict] | None = None,
 ) -> list[str]:
     """Generate manifests for all sub-tiles of one MER tile.
 
@@ -60,13 +90,59 @@ def prepare_tile(
         tile_id: MER tile ID.
         config_yaml: Path to the pipeline config YAML.
         obs_index_dict: Serialized ObservationIndex from build_obs_index.
+        quadrant_index_dict: Serialized quadrant index. If provided,
+            enables WCS-based spatial filtering.
 
     Returns:
         List of manifest file paths.
     """
     config = PipelineConfig.from_yaml(config_yaml)
     obs_index = ObservationIndex.from_dict(obs_index_dict)
-    return write_manifests_for_tile(tile_id, config, obs_index)
+
+    quadrant_index = None
+    if quadrant_index_dict is not None:
+        quadrant_index = quadrant_index_from_dict(quadrant_index_dict)
+
+    return write_manifests_for_tile(
+        tile_id, config, obs_index, quadrant_index=quadrant_index
+    )
+
+
+@task
+def extract_tile_task(
+    tile_id: int,
+    config_yaml: str,
+    manifest_paths: list[str],
+) -> list[str]:
+    """Extract quadrant FITS and catalog subsets for all sub-tiles of a tile.
+
+    Downloads source FITS files, extracts relevant quadrant HDUs,
+    subsets the MER catalog, and writes self-contained sub-tile
+    directories with relative-path manifests.
+
+    Args:
+        tile_id: MER tile ID (for logging).
+        config_yaml: Path to the pipeline config YAML.
+        manifest_paths: List of manifest file paths to extract.
+
+    Returns:
+        List of extracted sub-tile directory paths.
+    """
+    config = PipelineConfig.from_yaml(config_yaml)
+    subtile_dirs: list[str] = []
+
+    for manifest_path in manifest_paths:
+        subtile_dir = extract_subtile(
+            manifest_path,
+            extraction_dir=config.output.extraction_dir,
+            s3_anon=config.data.s3_no_sign_request,
+        )
+        subtile_dirs.append(subtile_dir)
+
+    logger.info(
+        "Extracted %d sub-tiles for tile %d", len(subtile_dirs), tile_id
+    )
+    return subtile_dirs
 
 
 @task

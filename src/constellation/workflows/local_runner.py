@@ -11,8 +11,10 @@ import logging
 from constellation.catalog_assembler import assemble_catalog, validate_catalog
 from constellation.config import PipelineConfig
 from constellation.discovery import build_observation_index
+from constellation.extractor import extract_subtile
 from constellation.manifest import write_manifests_for_tile
 from constellation.mock_shine import run_mock_inference
+from constellation.quadrant_resolver import build_quadrant_index
 from constellation.result_writer import write_subtile_result
 
 logger = logging.getLogger(__name__)
@@ -38,16 +40,57 @@ def run_local_pipeline(config: PipelineConfig) -> dict:
         "Found %d observations", len(obs_index.obs_ids())
     )
 
-    # Step 2: Prepare manifests for all tiles
+    # Step 2: Build quadrant spatial index from FITS headers
+    logger.info("Building quadrant index from FITS WCS headers")
+    quadrant_index = None
+    try:
+        idx = build_quadrant_index(
+            obs_index,
+            s3_anon=config.data.s3_no_sign_request,
+        )
+        if idx:
+            quadrant_index = idx
+            logger.info(
+                "Built quadrant index with %d footprints", len(quadrant_index)
+            )
+        else:
+            logger.warning(
+                "Quadrant index is empty, falling back to legacy mode"
+            )
+    except Exception:
+        logger.warning(
+            "Failed to build quadrant index, falling back to legacy mode",
+            exc_info=True,
+        )
+
+    # Step 3: Prepare manifests for all tiles
     all_manifest_paths: list[str] = []
     for tile_id in config.tile_ids:
         logger.info("Preparing tile %d", tile_id)
-        manifest_paths = write_manifests_for_tile(tile_id, config, obs_index)
+        manifest_paths = write_manifests_for_tile(
+            tile_id, config, obs_index, quadrant_index=quadrant_index
+        )
         all_manifest_paths.extend(manifest_paths)
 
     logger.info("Generated %d manifests total", len(all_manifest_paths))
 
-    # Step 3: Run inference on each sub-tile
+    # Step 4: Extract sub-tile data (if quadrant index was built)
+    if quadrant_index is not None:
+        logger.info("Extracting sub-tile data")
+        for i, manifest_path in enumerate(all_manifest_paths):
+            extract_subtile(
+                manifest_path,
+                extraction_dir=config.output.extraction_dir,
+                s3_anon=config.data.s3_no_sign_request,
+            )
+            if (i + 1) % 50 == 0 or (i + 1) == len(all_manifest_paths):
+                logger.info(
+                    "Extracted %d / %d sub-tiles",
+                    i + 1,
+                    len(all_manifest_paths),
+                )
+
+    # Step 5: Run inference on each sub-tile
     result_paths: list[str] = []
     for i, manifest_path in enumerate(all_manifest_paths):
         if config.mock_shine:
@@ -64,7 +107,7 @@ def run_local_pipeline(config: PipelineConfig) -> dict:
         if (i + 1) % 50 == 0 or (i + 1) == len(all_manifest_paths):
             logger.info("Inferred %d / %d sub-tiles", i + 1, len(all_manifest_paths))
 
-    # Step 4: Assemble catalog
+    # Step 6: Assemble catalog
     logger.info("Assembling catalog from %d results", len(result_paths))
     n_rows = assemble_catalog(
         result_paths,
@@ -74,7 +117,7 @@ def run_local_pipeline(config: PipelineConfig) -> dict:
     )
     logger.info("Assembled %d rows into Iceberg catalog", n_rows)
 
-    # Step 5: Validate
+    # Step 7: Validate
     rows, cols = config.tiling.sub_tile_grid
     expected = len(config.tile_ids) * rows * cols
     stats = validate_catalog(

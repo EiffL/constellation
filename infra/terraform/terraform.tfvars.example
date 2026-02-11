@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars and fill in.
+
+project     = "constellation"
+environment = "dev"
+region      = "us-east-1"
+
+# EKS
+eks_cluster_version        = "1.31"
+system_instance_types      = ["t3.medium"]
+cpu_worker_instance_types  = ["t3a.medium", "t3.medium", "t3a.large", "t3.large"]
+cpu_worker_max_nodes       = 10          # parallel tile prep tasks
+gpu_instance_types         = ["g6.xlarge", "g5.xlarge"]
+gpu_max_nodes              = 10          # bump for production campaigns
+
+# Network access — restrict to your IP / VPN CIDR
+allowed_api_cidrs = ["0.0.0.0/0"]    # CHANGE THIS
+
+# RDS
+db_instance_class = "db.t4g.micro"   # ~$15/mo; use db.t4g.small for prod
+# (password is auto-generated and stored in Secrets Manager)

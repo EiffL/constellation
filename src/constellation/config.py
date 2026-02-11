@@ -52,6 +52,7 @@ class OutputConfig(BaseModel):
     catalog_table: str = "edff_shear"
     result_dir: str = "results/"
     manifest_dir: str = "manifests/"
+    extraction_dir: str = "subtiles/"
 
 
 class PipelineConfig(BaseModel):
