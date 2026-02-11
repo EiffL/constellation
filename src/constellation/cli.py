@@ -26,27 +26,21 @@ def cli(verbose: bool) -> None:
 @click.option(
     "--config", "config_yaml", required=True, help="Path to pipeline config YAML."
 )
-@click.option(
-    "--local", is_flag=True, default=False, help="Run locally (no Flyte cluster)."
-)
-def run(config_yaml: str, local: bool) -> None:
-    """Run the shear inference pipeline end-to-end."""
-    config = PipelineConfig.from_yaml(config_yaml)
+def run(config_yaml: str) -> None:
+    """Run the shear inference pipeline via Flyte.
 
-    if local:
-        from constellation.workflows.local_runner import run_local_pipeline
+    Submit the workflow using pyflyte or the Flyte console:
 
-        stats = run_local_pipeline(config)
-    else:
-        click.echo(
-            "Remote Flyte execution not yet implemented. Use --local.",
-            err=True,
-        )
-        raise SystemExit(1)
-
-    click.echo(f"Pipeline complete. Rows: {stats['row_count']}, "
-               f"Tiles: {stats['tile_count']}, "
-               f"Completeness: {stats['completeness']:.2%}")
+        pyflyte run src/constellation/workflows/pipeline.py shear_pipeline \\
+            --config_yaml <config> --tile_ids '[...]'
+    """
+    click.echo(
+        "Use pyflyte to submit the workflow:\n\n"
+        "  pyflyte run src/constellation/workflows/pipeline.py shear_pipeline \\\n"
+        f"    --config_yaml {config_yaml} --tile_ids '<tile_ids>'\n",
+        err=True,
+    )
+    raise SystemExit(1)
 
 
 @cli.command()

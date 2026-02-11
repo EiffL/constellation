@@ -1,4 +1,4 @@
-"""Tests for constellation.workflows (tasks + local_runner)."""
+"""Tests for constellation.workflows (Flyte tasks)."""
 
 from constellation.discovery import ObservationIndex, VISFileRecord
 from constellation.workflows.tasks import (

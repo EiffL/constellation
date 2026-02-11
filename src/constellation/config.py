@@ -53,6 +53,7 @@ class OutputConfig(BaseModel):
     result_dir: str = "results/"
     manifest_dir: str = "manifests/"
     extraction_dir: str = "subtiles/"
+    storage_base_uri: str = ""
 
 
 class PipelineConfig(BaseModel):

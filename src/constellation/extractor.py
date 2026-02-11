@@ -345,7 +345,7 @@ def extract_subtile(
         source_ids=source_ids,
         core_source_ids=core_source_ids,
     )
-    new_manifest.to_yaml(subtile_dir / "manifest.yaml")
+    new_manifest.to_yaml(subtile_dir / "manifest_local.yaml")
 
     logger.info(
         "Extracted sub-tile %d/%d_%d: %d quadrants, %d sources",

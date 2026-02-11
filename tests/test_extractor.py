@@ -202,7 +202,7 @@ class TestExtractSubtile:
 
         subtile_path = Path(subtile_dir)
         assert subtile_path.exists()
-        assert (subtile_path / "manifest.yaml").exists()
+        assert (subtile_path / "manifest_local.yaml").exists()
         assert (subtile_path / "catalog.fits").exists()
         assert (subtile_path / "exposures").is_dir()
         assert (subtile_path / "psf").is_dir()
@@ -257,7 +257,7 @@ class TestExtractSubtile:
 
         # Read the rewritten manifest
         new_manifest = SubTileManifest.from_yaml(
-            Path(subtile_dir) / "manifest.yaml"
+            Path(subtile_dir) / "manifest_local.yaml"
         )
 
         assert new_manifest.source_catalog == "catalog.fits"
@@ -311,7 +311,7 @@ class TestExtractSubtile:
         )
 
         new_manifest = SubTileManifest.from_yaml(
-            Path(subtile_dir) / "manifest.yaml"
+            Path(subtile_dir) / "manifest_local.yaml"
         )
 
         assert len(new_manifest.source_ids) > 0

@@ -74,6 +74,7 @@ output:
   result_dir: "/tmp/constellation-results/"
   manifest_dir: "/tmp/constellation-manifests/"
   extraction_dir: "/tmp/constellation-subtiles/"
+  storage_base_uri: ""
 
 mock_shine: true
 

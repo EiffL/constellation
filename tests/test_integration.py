@@ -1,4 +1,7 @@
-"""Integration test: end-to-end local pipeline with moto S3."""
+"""Integration tests: end-to-end pipeline stages with moto S3.
+
+Tests call Flyte task functions directly (they're callable as plain Python).
+"""
 
 from __future__ import annotations
 
@@ -7,18 +10,22 @@ from pathlib import Path
 import pytest
 
 from constellation.config import PipelineConfig
-from constellation.workflows.local_runner import run_local_pipeline
+from constellation.workflows.tasks import (
+    assemble_results,
+    build_obs_index,
+    infer_subtile,
+    prepare_tile,
+    validate_results,
+)
 
 
 @pytest.mark.integration
 class TestEndToEnd:
-    def test_local_pipeline_three_tiles(self, mock_s3, tmp_path):
-        """Run the full pipeline with 3 tiles using moto-mocked S3.
+    def test_pipeline_stages_three_tiles(self, mock_s3, tmp_path):
+        """Run pipeline stages sequentially with 3 tiles using moto-mocked S3.
 
-        Expected: 3 tiles × 16 sub-tiles = 48 rows in Iceberg.
+        Expected: 3 tiles x 16 sub-tiles = 48 rows in Iceberg.
         Uses legacy mode (empty FITS files, no WCS headers).
-        Note: s3_no_sign_request=False because moto doesn't support
-        UNSIGNED for get_object.
         """
         config = PipelineConfig(
             field_name="EDFF_TEST",
@@ -32,15 +39,48 @@ class TestEndToEnd:
             },
             mock_shine=True,
         )
+        config_path = tmp_path / "config.yaml"
+        config.to_yaml(config_path)
+        config_yaml = str(config_path)
 
-        stats = run_local_pipeline(config)
+        # Build observation index
+        obs_dict = build_obs_index(config_yaml=config_yaml)
 
+        # Prepare manifests for all tiles
+        all_manifest_paths: list[str] = []
+        for tile_id in config.tile_ids:
+            paths = prepare_tile(
+                tile_id=tile_id,
+                config_yaml=config_yaml,
+                obs_index_dict=obs_dict,
+            )
+            all_manifest_paths.extend(paths)
+
+        assert len(all_manifest_paths) == 48
+
+        # Infer all sub-tiles
+        result_paths: list[str] = []
+        for mp in all_manifest_paths:
+            rp = infer_subtile(manifest_path=mp, config_yaml=config_yaml)
+            result_paths.append(rp)
+
+        assert len(result_paths) == 48
+
+        # Assemble and validate
+        n_rows = assemble_results(
+            result_paths=result_paths, config_yaml=config_yaml
+        )
+        assert n_rows == 48
+
+        stats = validate_results(
+            config_yaml=config_yaml, expected_subtiles=48
+        )
         assert stats["row_count"] == 48
         assert stats["tile_count"] == 3
         assert stats["completeness"] == 1.0
-        assert abs(stats["g1_mean"]) < 0.1  # mock shear should be near 0
+        assert abs(stats["g1_mean"]) < 0.1
 
-    def test_local_pipeline_single_tile(self, mock_s3, tmp_path):
+    def test_pipeline_stages_single_tile(self, mock_s3, tmp_path):
         """Single tile produces 16 rows."""
         config = PipelineConfig(
             field_name="EDFF_TEST",
@@ -54,9 +94,31 @@ class TestEndToEnd:
             },
             mock_shine=True,
         )
+        config_path = tmp_path / "config.yaml"
+        config.to_yaml(config_path)
+        config_yaml = str(config_path)
 
-        stats = run_local_pipeline(config)
+        obs_dict = build_obs_index(config_yaml=config_yaml)
+        manifest_paths = prepare_tile(
+            tile_id=102018211,
+            config_yaml=config_yaml,
+            obs_index_dict=obs_dict,
+        )
+        assert len(manifest_paths) == 16
 
+        result_paths = [
+            infer_subtile(manifest_path=mp, config_yaml=config_yaml)
+            for mp in manifest_paths
+        ]
+
+        n_rows = assemble_results(
+            result_paths=result_paths, config_yaml=config_yaml
+        )
+        assert n_rows == 16
+
+        stats = validate_results(
+            config_yaml=config_yaml, expected_subtiles=16
+        )
         assert stats["row_count"] == 16
         assert stats["tile_count"] == 1
         assert stats["completeness"] == 1.0
@@ -65,31 +127,6 @@ class TestEndToEnd:
 @pytest.mark.integration
 class TestEndToEndWithFits:
     """Integration tests using mock FITS files with valid WCS headers."""
-
-    def test_pipeline_with_quadrant_resolution(self, mock_s3_with_fits, tmp_path):
-        """Full pipeline with WCS-based quadrant resolution and extraction.
-
-        Uses mock_s3_with_fits which has real FITS files with valid WCS
-        headers, so quadrant resolution succeeds and extraction runs.
-        """
-        config = PipelineConfig(
-            field_name="EDFF_TEST",
-            tile_ids=[102018211],
-            data={"s3_no_sign_request": False},
-            output={
-                "catalog_warehouse": str(tmp_path / "warehouse"),
-                "result_dir": str(tmp_path / "results"),
-                "manifest_dir": str(tmp_path / "manifests"),
-                "extraction_dir": str(tmp_path / "subtiles"),
-            },
-            mock_shine=True,
-        )
-
-        stats = run_local_pipeline(config)
-
-        assert stats["row_count"] == 16
-        assert stats["tile_count"] == 1
-        assert stats["completeness"] == 1.0
 
     def test_extraction_creates_subtile_dirs(self, mock_s3_with_fits, tmp_path):
         """Verify that extraction creates the expected directory structure."""
@@ -134,7 +171,7 @@ class TestEndToEndWithFits:
 
         subtile_path = Path(subtile_dir)
         assert subtile_path.exists()
-        assert (subtile_path / "manifest.yaml").exists()
+        assert (subtile_path / "manifest_local.yaml").exists()
         assert (subtile_path / "catalog.fits").exists()
         assert (subtile_path / "exposures").is_dir()
         assert (subtile_path / "psf").is_dir()

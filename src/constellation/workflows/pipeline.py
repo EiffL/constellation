@@ -9,21 +9,8 @@ iterate over Promise inputs directly.
 
 from __future__ import annotations
 
-try:
-    from flytekit import dynamic, workflow
-    from flytekit.types.file import FlyteFile
-except Exception:
-
-    def workflow(fn):
-        return fn
-
-    def dynamic(fn=None, **kwargs):
-        if fn is not None:
-            return fn
-        return lambda f: f
-
-    FlyteFile = str
-
+from flytekit import dynamic, workflow
+from flytekit.types.file import FlyteFile
 
 from constellation.workflows.tasks import (
     assemble_results,
@@ -32,6 +19,7 @@ from constellation.workflows.tasks import (
     extract_tile_task,
     infer_subtile,
     prepare_tile,
+    resolve_run_id,
     validate_results,
 )
 
@@ -42,6 +30,7 @@ def process_tiles(
     config_yaml: str,
     obs_index_dict: dict,
     quadrant_index_dict: list[dict],
+    run_id: str = "",
 ) -> list[FlyteFile]:
     """Process all tiles: prepare, extract, infer. Runs as @dynamic so we can iterate."""
     all_result_paths: list[FlyteFile] = []
@@ -51,18 +40,21 @@ def process_tiles(
             config_yaml=config_yaml,
             obs_index_dict=obs_index_dict,
             quadrant_index_dict=quadrant_index_dict,
+            run_id=run_id,
         )
 
         extract_tile_task(
             tile_id=tile_id,
             config_yaml=config_yaml,
             manifest_paths=manifest_paths,
+            run_id=run_id,
         )
 
         result_paths = infer_tile(
             tile_id=tile_id,
             config_yaml=config_yaml,
             manifest_paths=manifest_paths,
+            run_id=run_id,
         )
         all_result_paths.extend(result_paths)
 
@@ -74,6 +66,7 @@ def infer_tile(
     tile_id: int,
     config_yaml: str,
     manifest_paths: list[FlyteFile],
+    run_id: str = "",
 ) -> list[FlyteFile]:
     """Infer all sub-tiles of one tile. @dynamic so we can iterate over manifest_paths."""
     result_paths: list[FlyteFile] = []
@@ -81,6 +74,7 @@ def infer_tile(
         result_path = infer_subtile(
             manifest_path=manifest_path,
             config_yaml=config_yaml,
+            run_id=run_id,
         )
         result_paths.append(result_path)
     return result_paths
@@ -100,6 +94,9 @@ def shear_pipeline(
     Returns:
         Validation statistics dict.
     """
+    # Step 0: Resolve run ID (Flyte execution ID or timestamp fallback)
+    run_id = resolve_run_id(config_yaml=config_yaml)
+
     # Step 1: Build observation index once (shared across all tiles)
     obs_index_dict = build_obs_index(config_yaml=config_yaml)
 
@@ -115,6 +112,7 @@ def shear_pipeline(
         config_yaml=config_yaml,
         obs_index_dict=obs_index_dict,
         quadrant_index_dict=quadrant_index_dict,
+        run_id=run_id,
     )
 
     # Step 6: Assemble all results into Iceberg catalog
