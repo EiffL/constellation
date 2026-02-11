@@ -10,7 +10,7 @@ module "eks" {
   cluster_version = var.eks_cluster_version
 
   vpc_id     = module.vpc.vpc_id
-  subnet_ids = module.vpc.private_subnets
+  subnet_ids = module.vpc.public_subnets
 
   # Restrict API access to specific CIDRs (var.allowed_api_cidrs).
   cluster_endpoint_public_access       = true

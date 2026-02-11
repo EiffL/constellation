@@ -9,18 +9,16 @@ resource "random_password" "flyte_db" {
   special = false # avoids shell-escaping issues when injecting into Helm values
 }
 
-resource "aws_secretsmanager_secret" "flyte_db_password" {
-  name = "${local.cluster_name}/flyte-db-password"
-}
-
-resource "aws_secretsmanager_secret_version" "flyte_db_password" {
-  secret_id     = aws_secretsmanager_secret.flyte_db_password.id
-  secret_string = random_password.flyte_db.result
+# SSM Parameter Store (free) instead of Secrets Manager ($0.40/mo/secret).
+resource "aws_ssm_parameter" "flyte_db_password" {
+  name  = "/${local.cluster_name}/flyte-db-password"
+  type  = "SecureString"
+  value = random_password.flyte_db.result
 }
 
 resource "aws_db_subnet_group" "flyte" {
   name       = "${local.cluster_name}-flyte"
-  subnet_ids = module.vpc.private_subnets
+  subnet_ids = module.vpc.public_subnets
 }
 
 resource "aws_security_group" "rds" {
@@ -51,7 +49,7 @@ resource "aws_db_instance" "flyte" {
   instance_class = var.db_instance_class
 
   allocated_storage = 20
-  storage_type      = "gp3"
+  storage_type      = "gp2" # free tier covers gp2, not gp3
   storage_encrypted = true
 
   db_name  = "flyteadmin"

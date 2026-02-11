@@ -29,7 +29,7 @@ variable "eks_cluster_version" {
 variable "system_instance_types" {
   description = "Instance types for the system (Flyte control-plane) node group"
   type        = list(string)
-  default     = ["t3.medium"]
+  default     = ["t3.small"]
 }
 
 variable "gpu_instance_types" {

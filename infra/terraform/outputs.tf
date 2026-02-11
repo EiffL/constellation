@@ -55,9 +55,9 @@ output "flyte_tasks_role_arn" {
   value       = module.flyte_tasks_irsa.iam_role_arn
 }
 
-# Secrets Manager ─────────────────────────────────────────────────────────────
+# SSM ─────────────────────────────────────────────────────────────────────────
 
-output "flyte_db_password_secret_arn" {
-  description = "Secrets Manager ARN for the Flyte DB password"
-  value       = aws_secretsmanager_secret.flyte_db_password.arn
+output "flyte_db_password_ssm_name" {
+  description = "SSM parameter name for the Flyte DB password"
+  value       = aws_ssm_parameter.flyte_db_password.name
 }
