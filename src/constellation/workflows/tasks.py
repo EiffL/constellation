@@ -14,6 +14,7 @@ import logging
 
 try:
     from flytekit import task
+    from flytekit.types.file import FlyteFile
 except Exception:
     # Flytekit may not be compatible with the current Python version.
     # Provide a passthrough decorator so functions still work.
@@ -21,6 +22,8 @@ except Exception:
         if _fn is not None:
             return _fn
         return lambda fn: fn
+
+    FlyteFile = str
 
 
 from constellation.catalog_assembler import assemble_catalog, validate_catalog
@@ -77,13 +80,13 @@ def build_quadrant_index_task(
     return quadrant_index_to_dict(index)
 
 
-@task(cache=True, cache_version="1")
+@task(cache=True, cache_version="2")
 def prepare_tile(
     tile_id: int,
     config_yaml: str,
     obs_index_dict: dict,
     quadrant_index_dict: list[dict] | None = None,
-) -> list[str]:
+) -> list[FlyteFile]:
     """Generate manifests for all sub-tiles of one MER tile.
 
     Args:
@@ -108,11 +111,11 @@ def prepare_tile(
     )
 
 
-@task
+@task(cache=True, cache_version="1")
 def extract_tile_task(
     tile_id: int,
     config_yaml: str,
-    manifest_paths: list[str],
+    manifest_paths: list[FlyteFile],
 ) -> list[str]:
     """Extract quadrant FITS and catalog subsets for all sub-tiles of a tile.
 
@@ -145,8 +148,8 @@ def extract_tile_task(
     return subtile_dirs
 
 
-@task
-def infer_subtile(manifest_path: str, config_yaml: str) -> str:
+@task(cache=True, cache_version="1")
+def infer_subtile(manifest_path: FlyteFile, config_yaml: str) -> FlyteFile:
     """Run inference on a single sub-tile.
 
     Uses mock SHINE if configured, otherwise would invoke real SHINE.
@@ -169,7 +172,7 @@ def infer_subtile(manifest_path: str, config_yaml: str) -> str:
 
 @task
 def assemble_results(
-    result_paths: list[str],
+    result_paths: list[FlyteFile],
     config_yaml: str,
 ) -> int:
     """Merge all sub-tile results into the Iceberg catalog.

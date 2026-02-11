@@ -75,7 +75,7 @@ class TestInferSubtile:
             manifest_path=str(manifest_path),
             config_yaml=str(config_path),
         )
-        assert result_path.endswith(".parquet")
+        assert str(result_path).endswith(".parquet")
 
 
 class TestAssembleAndValidate:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 try:
     from flytekit import dynamic, workflow
+    from flytekit.types.file import FlyteFile
 except Exception:
 
     def workflow(fn):
@@ -20,6 +21,8 @@ except Exception:
         if fn is not None:
             return fn
         return lambda f: f
+
+    FlyteFile = str
 
 
 from constellation.workflows.tasks import (
@@ -39,9 +42,9 @@ def process_tiles(
     config_yaml: str,
     obs_index_dict: dict,
     quadrant_index_dict: list[dict],
-) -> list[str]:
+) -> list[FlyteFile]:
     """Process all tiles: prepare, extract, infer. Runs as @dynamic so we can iterate."""
-    all_result_paths: list[str] = []
+    all_result_paths: list[FlyteFile] = []
     for tile_id in tile_ids:
         manifest_paths = prepare_tile(
             tile_id=tile_id,
@@ -70,10 +73,10 @@ def process_tiles(
 def infer_tile(
     tile_id: int,
     config_yaml: str,
-    manifest_paths: list[str],
-) -> list[str]:
+    manifest_paths: list[FlyteFile],
+) -> list[FlyteFile]:
     """Infer all sub-tiles of one tile. @dynamic so we can iterate over manifest_paths."""
-    result_paths: list[str] = []
+    result_paths: list[FlyteFile] = []
     for manifest_path in manifest_paths:
         result_path = infer_subtile(
             manifest_path=manifest_path,
@@ -120,10 +123,10 @@ def shear_pipeline(
         config_yaml=config_yaml,
     )
 
-    # Step 7: Validate
+    # Step 7: Validate (takes n_rows to create a data dependency on assembly)
     stats = validate_results(
         config_yaml=config_yaml,
-        expected_subtiles=0,
+        expected_subtiles=n_rows,
     )
 
     return stats
