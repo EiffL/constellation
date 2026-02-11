@@ -18,9 +18,9 @@ resource "aws_iam_policy" "flyte_backend" {
         Sid    = "FlyteS3ReadWrite"
         Effect = "Allow"
         Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject",
+          "s3:GetObject*",
+          "s3:PutObject*",
+          "s3:DeleteObject*",
           "s3:ListBucket",
           "s3:GetBucketLocation",
         ]
@@ -42,7 +42,7 @@ module "flyte_backend_irsa" {
   oidc_providers = {
     main = {
       provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["flyte:flyte-backend"]
+      namespace_service_accounts = ["flyte:flyte-backend-flyte-binary"]
     }
   }
 
@@ -82,9 +82,9 @@ resource "aws_iam_policy" "flyte_tasks" {
         Sid    = "PipelineBucketReadWrite"
         Effect = "Allow"
         Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject",
+          "s3:GetObject*",
+          "s3:PutObject*",
+          "s3:DeleteObject*",
           "s3:ListBucket",
           "s3:GetBucketLocation",
         ]
@@ -97,9 +97,9 @@ resource "aws_iam_policy" "flyte_tasks" {
         Sid    = "FlyteArtifactsReadWrite"
         Effect = "Allow"
         Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject",
+          "s3:GetObject*",
+          "s3:PutObject*",
+          "s3:DeleteObject*",
           "s3:ListBucket",
           "s3:GetBucketLocation",
         ]
@@ -121,13 +121,12 @@ module "flyte_tasks_irsa" {
   oidc_providers = {
     main = {
       provider_arn = module.eks.oidc_provider_arn
-      # Flyte creates per-project-domain namespaces; tasks run under the
-      # "default" service account in each.
-      namespace_service_accounts = [
-        "flytesnacks-development:default",
-        "flytesnacks-staging:default",
-        "flytesnacks-production:default",
-      ]
+      # Flyte dynamically creates per-project-domain namespaces (e.g.
+      # flytesnacks-development, constellation-production, ...).
+      # Use StringLike with a wildcard so any namespace's default SA
+      # can assume this role.
+      namespace_service_accounts = ["*:default"]
+      condition_test             = "StringLike"
     }
   }
 

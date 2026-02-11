@@ -7,81 +7,120 @@ with the Euclid Q1 data in `s3://nasa-irsa-euclid-q1`).
 
 | Resource | Purpose | Approx. cost (dev) |
 |----------|---------|---------------------|
-| VPC (2 AZs, NAT gateway) | Networking | ~$35/mo |
-| EKS cluster | Kubernetes control plane | ~$75/mo |
-| System node group (2× t3.large) | Flyte control plane | ~$120/mo |
+| VPC (2 AZs, public subnets) | Networking | ~$0 |
+| S3 VPC gateway endpoint | Free S3 traffic | $0 |
+| EKS cluster | Kubernetes control plane | ~$73/mo |
+| System node group (1× t3.small) | Flyte control plane | ~$15/mo |
+| CPU worker node group (0–N× t3a.medium spot) | Data prep tasks | ~$0.008/hr per node |
 | GPU node group (0–N× g6.xlarge spot) | SHINE inference | ~$0.25/hr per node |
-| RDS PostgreSQL (db.t4g.micro) | Flyte metadata | ~$15/mo |
-| S3 buckets (×2) | Flyte artifacts + pipeline data | ~$1/mo |
+| RDS PostgreSQL (db.t4g.micro) | Flyte metadata | $0 (free tier) |
+| S3 buckets (×2) | Flyte artifacts + pipeline data | ~$0 |
+| KMS key | EKS secrets encryption | ~$1/mo |
 | NVIDIA device plugin | GPU scheduling | — |
-| Cluster Autoscaler | Scale GPU nodes 0→N | — |
+| Cluster Autoscaler | Scale worker nodes 0→N | — |
 
-**Baseline monthly cost (idle, no GPU jobs): ~$245/mo**
+**Baseline monthly cost (idle, no GPU jobs): ~$90/mo**
 
 ## Prerequisites
 
-- AWS CLI configured with appropriate credentials
+- AWS CLI configured (`aws configure`) with credentials that can create
+  EKS clusters, RDS instances, IAM roles, and S3 buckets
 - Terraform >= 1.5
 - `kubectl`
+- `helm`
 
-## Deploy
+## Step 1 — Deploy infrastructure
 
 ```bash
 cd infra/terraform
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars — at minimum set db_password
+```
 
+Edit `terraform.tfvars`:
+- Set `allowed_api_cidrs` to your IP (run `curl -s ifconfig.me` to find it)
+- Adjust `gpu_max_nodes` / `cpu_worker_max_nodes` if needed
+
+```bash
 terraform init
-terraform plan
-terraform apply
+terraform plan        # review what will be created
+terraform apply       # ~15 min for EKS
 ```
 
-## Configure kubectl
+## Step 2 — Configure kubectl
 
 ```bash
-# Printed by terraform output:
-aws eks update-kubeconfig --region us-east-1 --name constellation-dev
+$(terraform output -raw configure_kubectl)
+kubectl get nodes     # should show 1 system node
 ```
 
-## Install Flyte
+## Step 3 — Retrieve DB password
 
-After `terraform apply`, install Flyte using the cloud-simple deployment:
+The password was auto-generated and stored in SSM Parameter Store:
 
 ```bash
-# 1. Create namespace
-kubectl create namespace flyte
+aws ssm get-parameter \
+  --name "$(terraform output -raw flyte_db_password_ssm_name)" \
+  --with-decryption \
+  --query Parameter.Value \
+  --output text
+```
 
-# 2. Download and customise the starter values
+## Step 4 — Install Flyte
+
+```bash
+# Add Helm repo
+helm repo add flyteorg https://flyteorg.github.io/flyte
+helm repo update
+
+# Download the EKS starter values
 curl -sL https://raw.githubusercontent.com/flyteorg/flyte/master/charts/flyte-binary/eks-starter.yaml \
   > eks-values.yaml
+```
 
-# 3. Patch eks-values.yaml with your Terraform outputs:
-#
-#   database.host     = terraform output -raw flyte_db_host
-#   database.password = <your db_password>
-#   storage.s3.bucket = terraform output -raw flyte_bucket
-#   storage.s3.region = us-east-1
-#
-#   serviceAccount annotations:
-#     eks.amazonaws.com/role-arn = terraform output -raw flyte_backend_role_arn
-#
-#   cluster_resources → per-namespace SA annotation:
-#     eks.amazonaws.com/role-arn = terraform output -raw flyte_tasks_role_arn
+Edit `eks-values.yaml` — plug in your Terraform outputs:
 
-# 4. Install
-helm repo add flyteorg https://flyteorg.github.io/flyte
+| Helm value | Source |
+|------------|--------|
+| `configuration.database.host` | `terraform output -raw flyte_db_host` |
+| `configuration.database.password` | Step 3 above |
+| `configuration.storage.metadataContainer` | `terraform output -raw flyte_bucket` |
+| `configuration.storage.userDataContainer` | `terraform output -raw flyte_bucket` |
+| `configuration.storage.provider` | `s3` |
+| `configuration.storage.providerConfig.s3.region` | `us-east-1` |
+| `configuration.storage.providerConfig.s3.authType` | `iam` |
+| `serviceAccount.annotations` | `eks.amazonaws.com/role-arn: <flyte_backend_role_arn>` |
+| `clusterResourceTemplates.defaultIamRole` | `terraform output -raw flyte_tasks_role_arn` |
+
+```bash
+# Install
 helm install flyte-backend flyteorg/flyte-binary \
-  --namespace flyte \
+  --namespace flyte --create-namespace \
   --values eks-values.yaml
 
-# 5. Verify
-kubectl -n flyte get pods
+# Wait for pod to be ready
+kubectl -n flyte get pods -w
+
+# Access the console
 kubectl -n flyte port-forward svc/flyte-backend-flyte-binary-http 8088:8088
 # Open http://localhost:8088/console
+```
+
+## Step 5 — Register workflows
+
+```bash
+cd ../..   # back to repo root
+uv run pyflyte register src/constellation/workflows/ \
+  --project constellation \
+  --domain development
 ```
 
 ## Tear down
 
 ```bash
+# Uninstall Flyte first (cleans up namespaces Flyte created)
+helm uninstall flyte-backend --namespace flyte
+
+# Destroy infrastructure
+cd infra/terraform
 terraform destroy
 ```

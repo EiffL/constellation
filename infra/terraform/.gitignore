@@ -3,3 +3,4 @@
 *.tfstate.backup
 *.tfplan
 terraform.tfvars
+eks-values.yaml
