@@ -118,15 +118,15 @@ module "flyte_tasks_irsa" {
 
   role_name = "${local.cluster_name}-flyte-tasks"
 
+  # Flyte dynamically creates per-project-domain namespaces (e.g.
+  # flytesnacks-development, constellation-production, ...).
+  # Use StringLike so the wildcard in *:default actually matches.
+  assume_role_condition_test = "StringLike"
+
   oidc_providers = {
     main = {
-      provider_arn = module.eks.oidc_provider_arn
-      # Flyte dynamically creates per-project-domain namespaces (e.g.
-      # flytesnacks-development, constellation-production, ...).
-      # Use StringLike with a wildcard so any namespace's default SA
-      # can assume this role.
+      provider_arn               = module.eks.oidc_provider_arn
       namespace_service_accounts = ["*:default"]
-      condition_test             = "StringLike"
     }
   }
 
