@@ -7,5 +7,6 @@ COPY pyproject.toml uv.lock .python-version ./
 COPY src/ src/
 COPY configs/ configs/
 
+ENV UV_HTTP_TIMEOUT=600
 RUN uv sync --no-dev --frozen
 ENV PATH="/app/.venv/bin:$PATH"

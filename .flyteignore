@@ -1,0 +1,8 @@
+infra/
+tests/
+.git/
+.venv/
+extern/
+*.fits
+__pycache__/
+.pytest_cache/

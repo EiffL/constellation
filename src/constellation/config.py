@@ -65,6 +65,14 @@ class PipelineConfig(BaseModel):
     data: DataSourceConfig = DataSourceConfig()
     output: OutputConfig
     mock_shine: bool = False
+    max_parallelism: int = Field(
+        default=100,
+        description="Flyte workflow-level max parallelism.",
+    )
+    quadrant_concurrency: int = Field(
+        default=50,
+        description="map_task concurrency for DET header reads.",
+    )
     inference: dict[str, Any] = Field(default_factory=dict)
     gal: dict[str, Any] = Field(default_factory=dict)
 
