@@ -99,3 +99,17 @@ class PipelineConfig(BaseModel):
                 default_flow_style=False,
                 sort_keys=False,
             )
+
+    @classmethod
+    def from_yaml_content(cls, content: str) -> PipelineConfig:
+        """Load configuration from a YAML string."""
+        data = yaml.safe_load(content)
+        return cls.model_validate(data)
+
+    def to_yaml_content(self) -> str:
+        """Serialize configuration to a YAML string."""
+        return yaml.dump(
+            self.model_dump(mode="json"),
+            default_flow_style=False,
+            sort_keys=False,
+        )

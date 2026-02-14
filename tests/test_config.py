@@ -55,3 +55,21 @@ class TestPipelineConfig:
         loaded = PipelineConfig.from_yaml(path)
         assert loaded.inference["method"] == "map"
         assert loaded.gal["type"] == "Exponential"
+
+    def test_yaml_content_round_trip(self, sample_config):
+        content = sample_config.to_yaml_content()
+        loaded = PipelineConfig.from_yaml_content(content)
+        assert loaded.field_name == sample_config.field_name
+        assert loaded.tile_ids == sample_config.tile_ids
+        assert loaded.tiling.sub_tile_grid == sample_config.tiling.sub_tile_grid
+        assert loaded.mock_shine == sample_config.mock_shine
+
+    def test_from_yaml_content_with_overrides(self, sample_config):
+        content = sample_config.to_yaml_content()
+        loaded = PipelineConfig.from_yaml_content(content)
+        loaded.output.storage_base_uri = "s3://override-bucket"
+        loaded.tiling.sub_tile_grid = (2, 2)
+        content2 = loaded.to_yaml_content()
+        reloaded = PipelineConfig.from_yaml_content(content2)
+        assert reloaded.output.storage_base_uri == "s3://override-bucket"
+        assert reloaded.tiling.sub_tile_grid == (2, 2)

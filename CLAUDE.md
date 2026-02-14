@@ -112,12 +112,41 @@ uv run black src/ tests/
 uv run isort src/ tests/
 ```
 
+## Flyte Deployment
+
+**Container image:** `696356228955.dkr.ecr.us-east-1.amazonaws.com/constellation:latest` (ECR, us-east-1)
+
+**Fast registration** (no Docker build needed for code changes):
+```bash
+# Port-forward Flyte services (if not already)
+kubectl -n flyte port-forward svc/flyte-backend-flyte-binary-grpc 8089:8089 &
+kubectl -n flyte port-forward svc/flyte-backend-flyte-binary-http 8088:8088 &
+
+# Register workflows (uploads source tarball, uses pre-built base image)
+uv run pyflyte register \
+  --project constellation --domain development \
+  --image 696356228955.dkr.ecr.us-east-1.amazonaws.com/constellation:latest \
+  src/constellation/workflows
+
+# Register + run in one shot
+uv run pyflyte run --remote \
+  --project constellation --domain development \
+  --image 696356228955.dkr.ecr.us-east-1.amazonaws.com/constellation:latest \
+  src/constellation/workflows/pipeline.py data_preparation_pipeline \
+  --config_yaml configs/edff_single_tile.yaml \
+  --tile_ids '[102018211]'
+```
+
+The `--image` flag tells Flyte to use the pre-built ECR image (with deps) as the base. Fast registration (default) zips your Python source and uploads it to S3 — pods download and unpack it at runtime. **No Docker build per code change.** Only rebuild the image when dependencies change.
+
+**Flyte console:** http://localhost:8088/console
+
 ## Development Setup
 
 - **Package manager:** uv (pyproject.toml with hatchling backend)
 - **Python:** >=3.12 (venv at `.venv/`)
 - **SHINE:** symlinked at `extern/SHINE`
-- **Flyte:** local sandbox via `flytectl demo start`
+- **Flyte:** EKS cluster (see `infra/terraform/`), local access via `kubectl port-forward`
 
 ## Code Standards (from SHINE)
 

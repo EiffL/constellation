@@ -1,156 +1,105 @@
-"""Flyte workflow definition for the constellation shear pipeline.
+"""Flyte workflow definition for the constellation data-preparation pipeline.
 
 Orchestrates: observation index -> quadrant index (fan-out via map_task)
--> tile preparation -> per-sub-tile extraction -> inference -> catalog assembly.
+-> per-tile manifest generation + sub-tile extraction (single @dynamic).
 
-Uses map_task for embarrassingly parallel quadrant header reads, and
-nested @dynamic for per-sub-tile extract→infer pipelines with pairwise
-data dependencies.
+Each tile runs as a single ``prepare_and_extract_tile`` task, which
+downloads FITS files once and extracts all sub-tiles from local data.
+This avoids the catastrophic N-times re-download of the old per-sub-tile
+fan-out.
 
 Large intermediate data (quadrant footprints) is passed via FlyteFile
 (blob storage) rather than inline protobuf to stay under Flyte's 2 MB
 metadata limit.
-
-Note on @dynamic nesting: Inside a @dynamic, task calls return Promises
-(not resolved values). You cannot iterate over a Promise of list[...].
-Only the *inputs* to a @dynamic are resolved. So we split into two
-levels: process_tiles iterates over tile_ids (resolved input), and
-process_subtiles iterates over manifest_paths (resolved input from
-the outer @dynamic passing it as a parameter).
 """
 
 from __future__ import annotations
 
-from flytekit import dynamic, map_task, workflow
+from flytekit import WorkflowFailurePolicy, dynamic, map_task, workflow
 from flytekit.types.file import FlyteFile
 
 from constellation.workflows.tasks import (
-    assemble_results,
+    build_config,
     build_det_work_items,
     build_obs_index,
-    extract_subtile_task,
-    infer_subtile,
     merge_footprints,
-    prepare_tile,
+    prepare_and_extract_tile,
     read_det_footprints,
     resolve_run_id,
-    validate_results,
 )
 
 
 @dynamic
-def process_subtiles(
-    manifest_paths: list[FlyteFile],
-    config_yaml: str,
-    run_id: str = "",
-) -> list[FlyteFile]:
-    """Fan out extract→infer for each sub-tile of one tile.
-
-    manifest_paths is resolved here (it's an input to the @dynamic),
-    so we can iterate over it. Each sub-tile gets independent
-    extract + infer pods, with infer waiting on its matching
-    extraction via the extracted_dir data dependency.
-    """
-    result_paths: list[FlyteFile] = []
-    for manifest_path in manifest_paths:
-        extracted_dir = extract_subtile_task(
-            manifest_path=manifest_path,
-            config_yaml=config_yaml,
-            run_id=run_id,
-        )
-        result_path = infer_subtile(
-            manifest_path=manifest_path,
-            config_yaml=config_yaml,
-            run_id=run_id,
-            extracted_dir=extracted_dir,
-        )
-        result_paths.append(result_path)
-    return result_paths
-
-
-@dynamic
-def process_tiles(
+def prepare_and_extract_all_tiles(
     tile_ids: list[int],
-    config_yaml: str,
+    config_content: str,
     obs_index_dict: dict,
     quadrant_index_file: FlyteFile,
     run_id: str = "",
-) -> list[FlyteFile]:
-    """Process all tiles: prepare, then fan out per-sub-tile.
+) -> list[dict]:
+    """Fan out prepare_and_extract_tile for each MER tile.
 
     tile_ids is resolved (input to @dynamic), so we can iterate.
-    prepare_tile returns a Promise, so we pass it to
-    process_subtiles (another @dynamic) which receives it as a
-    resolved input.
+    Each tile gets a single pod that downloads FITS once and
+    extracts all sub-tiles.
     """
-    all_result_paths: list[FlyteFile] = []
+    results: list[dict] = []
     for tile_id in tile_ids:
-        manifest_paths = prepare_tile(
+        result = prepare_and_extract_tile(
             tile_id=tile_id,
-            config_yaml=config_yaml,
+            config_content=config_content,
             obs_index_dict=obs_index_dict,
             quadrant_index_file=quadrant_index_file,
             run_id=run_id,
         )
-
-        # Pass the Promise to a nested @dynamic where it gets resolved
-        tile_results = process_subtiles(
-            manifest_paths=manifest_paths,
-            config_yaml=config_yaml,
-            run_id=run_id,
-        )
-        all_result_paths.extend(tile_results)
-
-    return all_result_paths
+        results.append(result)
+    return results
 
 
-@workflow
-def shear_pipeline(
+@workflow(failure_policy=WorkflowFailurePolicy.FAIL_AFTER_EXECUTABLE_NODES_COMPLETE)
+def data_preparation_pipeline(
     config_yaml: str,
     tile_ids: list[int],
-) -> dict:
-    """End-to-end shear inference pipeline for a set of MER tiles.
+    storage_base_uri: str = "",
+    sub_tile_grid: list[int] = [],
+) -> list[dict]:
+    """Data-preparation pipeline: build quadrant index, then prepare and extract tiles.
 
     Args:
-        config_yaml: Path to the pipeline config YAML.
+        config_yaml: Path to the pipeline config YAML (baked into Docker image).
         tile_ids: List of MER tile IDs to process.
+        storage_base_uri: Override for output.storage_base_uri (pass at launch time).
+        sub_tile_grid: Override for tiling.sub_tile_grid as [rows, cols].
 
     Returns:
-        Validation statistics dict.
+        List of per-tile summary dicts with tile_id, n_subtiles, subtile_dirs.
     """
-    # Step 0: Resolve run ID (Flyte execution ID or timestamp fallback)
+    # Step 0: Merge base config (Docker image) with workflow-level overrides
+    config_content = build_config(
+        config_yaml=config_yaml,
+        storage_base_uri=storage_base_uri,
+        sub_tile_grid=sub_tile_grid,
+    )
+
+    # Step 1: Resolve run ID (Flyte execution ID or timestamp fallback)
     run_id = resolve_run_id(config_yaml=config_yaml)
 
-    # Step 1: Build observation index once (shared across all tiles)
-    obs_index_dict = build_obs_index(config_yaml=config_yaml)
+    # Step 2: Build observation index once (shared across all tiles)
+    obs_index_dict = build_obs_index(config_content=config_content)
 
-    # Step 2: Build quadrant spatial index — fan out via map_task
+    # Step 3: Build quadrant spatial index — fan out via map_task
     work_items = build_det_work_items(
-        config_yaml=config_yaml,
+        config_content=config_content,
         obs_index_dict=obs_index_dict,
     )
     footprint_files = map_task(read_det_footprints)(work_item=work_items)
     quadrant_index_file = merge_footprints(footprint_files=footprint_files)
 
-    # Steps 3-5: Process all tiles (dynamic — fan-out per sub-tile)
-    all_result_paths = process_tiles(
+    # Step 4: Prepare and extract all tiles (one pod per tile)
+    return prepare_and_extract_all_tiles(
         tile_ids=tile_ids,
-        config_yaml=config_yaml,
+        config_content=config_content,
         obs_index_dict=obs_index_dict,
         quadrant_index_file=quadrant_index_file,
         run_id=run_id,
     )
-
-    # Step 6: Assemble all results into Iceberg catalog
-    n_rows = assemble_results(
-        result_paths=all_result_paths,
-        config_yaml=config_yaml,
-    )
-
-    # Step 7: Validate (takes n_rows to create a data dependency on assembly)
-    stats = validate_results(
-        config_yaml=config_yaml,
-        expected_subtiles=n_rows,
-    )
-
-    return stats

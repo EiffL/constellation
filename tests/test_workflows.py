@@ -2,17 +2,15 @@
 
 import json
 
+from constellation.config import PipelineConfig
 from constellation.discovery import ObservationIndex, VISFileRecord
 from constellation.workflows.tasks import (
-    assemble_results,
+    build_config,
     build_det_work_items,
     build_obs_index,
-    extract_subtile_task,
-    infer_subtile,
     merge_footprints,
-    prepare_tile,
+    prepare_and_extract_tile,
     read_det_footprints,
-    validate_results,
 )
 
 
@@ -43,13 +41,46 @@ class TestObservationIndexSerialization:
         assert restored.obs_ids() == []
 
 
+class TestBuildConfig:
+    def test_overrides_storage_base_uri(self, sample_config, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        sample_config.to_yaml(config_path)
+
+        result = build_config(
+            config_yaml=str(config_path),
+            storage_base_uri="s3://override-bucket",
+        )
+        loaded = PipelineConfig.from_yaml_content(result)
+        assert loaded.output.storage_base_uri == "s3://override-bucket"
+
+    def test_overrides_sub_tile_grid(self, sample_config, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        sample_config.to_yaml(config_path)
+
+        result = build_config(
+            config_yaml=str(config_path),
+            sub_tile_grid=[2, 2],
+        )
+        loaded = PipelineConfig.from_yaml_content(result)
+        assert loaded.tiling.sub_tile_grid == (2, 2)
+
+    def test_empty_overrides_preserve_defaults(self, sample_config, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        sample_config.to_yaml(config_path)
+
+        result = build_config(config_yaml=str(config_path))
+        loaded = PipelineConfig.from_yaml_content(result)
+        assert loaded.output.storage_base_uri == sample_config.output.storage_base_uri
+        assert loaded.tiling.sub_tile_grid == sample_config.tiling.sub_tile_grid
+
+
 class TestPrepareTile:
-    def test_prepare_returns_manifests(self, mock_s3, sample_config, tmp_path):
+    def test_prepare_returns_manifests(self, mock_s3_with_fits, sample_config, tmp_path):
         from constellation.discovery import build_observation_index
 
         config = sample_config
-        config_path = tmp_path / "config.yaml"
-        config.to_yaml(config_path)
+        config.data.s3_no_sign_request = False
+        config.output.extraction_dir = str(tmp_path / "subtiles")
 
         obs_index = build_observation_index(
             vis_base_uri=config.data.vis_base_uri,
@@ -58,13 +89,20 @@ class TestPrepareTile:
         )
         obs_dict = obs_index.to_dict()
 
-        paths = prepare_tile(
+        # Write an empty quadrant index file
+        qi_path = tmp_path / "quadrant_index.json"
+        qi_path.write_text(json.dumps([]))
+
+        result = prepare_and_extract_tile(
             tile_id=config.tile_ids[0],
-            config_yaml=str(config_path),
+            config_content=config.to_yaml_content(),
             obs_index_dict=obs_dict,
+            quadrant_index_file=str(qi_path),
         )
-        # 4x4 grid = 16 manifests
-        assert len(paths) == 16
+        # 4x4 grid = 16 sub-tiles
+        assert result["n_subtiles"] == 16
+        assert result["tile_id"] == config.tile_ids[0]
+        assert len(result["subtile_dirs"]) == 16
 
 
 class TestBuildDetWorkItems:
@@ -109,7 +147,7 @@ class TestBuildDetWorkItems:
         obs_dict = index.to_dict()
 
         items = build_det_work_items(
-            config_yaml="unused",
+            config_content="unused",
             obs_index_dict=obs_dict,
         )
 
@@ -141,7 +179,7 @@ class TestBuildDetWorkItems:
         index = ObservationIndex(bucket="b", records={"2681": recs})
 
         items = build_det_work_items(
-            config_yaml="unused",
+            config_content="unused",
             obs_index_dict=index.to_dict(),
         )
         assert len(items) == 4
@@ -235,80 +273,34 @@ class TestMergeFootprints:
         assert merged == []
 
 
-class TestExtractSubtileTask:
-    def test_extract_returns_directory(
-        self, sample_manifest, sample_config, tmp_path
-    ):
-        """extract_subtile_task returns the extracted sub-tile directory."""
-        manifest_path = tmp_path / "102018211_0_0.yaml"
-        sample_manifest.to_yaml(manifest_path)
-
-        config_path = tmp_path / "config.yaml"
-        sample_config.output.extraction_dir = str(tmp_path / "subtiles")
-        sample_config.to_yaml(config_path)
-
-        subtile_dir = extract_subtile_task(
-            manifest_path=str(manifest_path),
-            config_yaml=str(config_path),
-        )
-        assert "102018211" in subtile_dir
-        assert "0_0" in subtile_dir
-
-
-class TestInferSubtile:
-    def test_infer_returns_parquet(self, sample_manifest, sample_config, tmp_path):
-        # Write manifest
-        manifest_path = tmp_path / "manifest.yaml"
-        sample_manifest.to_yaml(manifest_path)
-
-        # Write config
-        config_path = tmp_path / "config.yaml"
-        sample_config.to_yaml(config_path)
-
-        result_path = infer_subtile(
-            manifest_path=str(manifest_path),
-            config_yaml=str(config_path),
-        )
-        assert str(result_path).endswith(".parquet")
-
-    def test_infer_with_extracted_dir(
-        self, sample_manifest, sample_config, tmp_path
-    ):
-        """infer_subtile accepts extracted_dir for data dependency."""
-        manifest_path = tmp_path / "manifest.yaml"
-        sample_manifest.to_yaml(manifest_path)
-
-        config_path = tmp_path / "config.yaml"
-        sample_config.to_yaml(config_path)
-
-        result_path = infer_subtile(
-            manifest_path=str(manifest_path),
-            config_yaml=str(config_path),
-            extracted_dir="/tmp/fake_extracted",
-        )
-        assert str(result_path).endswith(".parquet")
-
-
-class TestAssembleAndValidate:
-    def test_assemble_and_validate(self, sample_result, sample_config, tmp_path):
-        from constellation.result_writer import write_subtile_result
+class TestPrepareAndExtractTile:
+    def test_returns_summary_dict(self, mock_s3_with_fits, sample_config, tmp_path):
+        """prepare_and_extract_tile returns a dict with tile_id, n_subtiles, subtile_dirs."""
+        from constellation.discovery import build_observation_index
 
         config = sample_config
-        config_path = tmp_path / "config.yaml"
-        config.to_yaml(config_path)
+        config.data.s3_no_sign_request = False
+        config.output.extraction_dir = str(tmp_path / "subtiles")
 
-        result_dir = str(tmp_path / "results")
-        p = write_subtile_result(sample_result, result_dir)
-
-        n = assemble_results(
-            result_paths=[p],
-            config_yaml=str(config_path),
+        obs_index = build_observation_index(
+            vis_base_uri=config.data.vis_base_uri,
+            s3_region=config.data.s3_region,
+            s3_no_sign_request=False,
         )
-        assert n == 1
+        obs_dict = obs_index.to_dict()
 
-        stats = validate_results(
-            config_yaml=str(config_path),
-            expected_subtiles=1,
+        # Write an empty quadrant index file
+        qi_path = tmp_path / "quadrant_index.json"
+        qi_path.write_text(json.dumps([]))
+
+        result = prepare_and_extract_tile(
+            tile_id=config.tile_ids[0],
+            config_content=config.to_yaml_content(),
+            obs_index_dict=obs_dict,
+            quadrant_index_file=str(qi_path),
         )
-        assert stats["row_count"] == 1
-        assert stats["completeness"] == 1.0
+
+        assert isinstance(result, dict)
+        assert result["tile_id"] == config.tile_ids[0]
+        assert result["n_subtiles"] == 16
+        assert len(result["subtile_dirs"]) == 16

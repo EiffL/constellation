@@ -1,4 +1,4 @@
-"""Flyte task definitions for the constellation pipeline.
+"""Flyte task definitions for the constellation data-preparation pipeline.
 
 Each task wraps a pure-Python function from the pipeline modules,
 making them callable both as Flyte tasks and as regular functions.
@@ -12,23 +12,18 @@ import os
 import tempfile
 from pathlib import Path
 
-from flytekit import Resources, task
+from flytekit import Cache, Resources, task
 from flytekit.types.file import FlyteFile
 
-from constellation.catalog_assembler import assemble_catalog, validate_catalog
 from constellation.config import PipelineConfig
 from constellation.discovery import ObservationIndex, build_observation_index
-from constellation.extractor import extract_subtile
+from constellation.extractor import extract_all_subtiles_for_tile
 from constellation.manifest import write_manifests_for_tile
-from constellation.mock_shine import run_mock_inference
 from constellation.quadrant_resolver import (
     QuadrantFootprint,
-    build_quadrant_index,
     quadrant_index_from_dict,
-    quadrant_index_to_dict,
     read_quadrant_footprints,
 )
-from constellation.result_writer import write_subtile_result
 from constellation.storage import (
     build_subtile_prefix,
     get_run_id,
@@ -60,13 +55,37 @@ def resolve_run_id(config_yaml: str) -> str:
     return get_run_id(field_name=config.field_name)
 
 
-@task(cache=True, cache_version="1")
-def build_obs_index(config_yaml: str) -> dict:
+@task
+def build_config(
+    config_yaml: str,
+    storage_base_uri: str = "",
+    sub_tile_grid: list[int] = [],
+) -> str:
+    """Read base config from Docker image, apply workflow overrides, return YAML string.
+
+    Args:
+        config_yaml: Path to the base config YAML (baked into Docker image).
+        storage_base_uri: Override for output.storage_base_uri.
+        sub_tile_grid: Override for tiling.sub_tile_grid as [rows, cols].
+
+    Returns:
+        Merged configuration as a YAML content string.
+    """
+    config = PipelineConfig.from_yaml(config_yaml)
+    if storage_base_uri:
+        config.output.storage_base_uri = storage_base_uri
+    if sub_tile_grid and len(sub_tile_grid) == 2:
+        config.tiling.sub_tile_grid = (sub_tile_grid[0], sub_tile_grid[1])
+    return config.to_yaml_content()
+
+
+@task(cache=Cache(version="2", serialize=True))
+def build_obs_index(config_content: str) -> dict:
     """Build the observation index from S3 listings.
 
     Returns the index serialized as a dict so Flyte can pass it between tasks.
     """
-    config = PipelineConfig.from_yaml(config_yaml)
+    config = PipelineConfig.from_yaml_content(config_content)
     obs_index = build_observation_index(
         vis_base_uri=config.data.vis_base_uri,
         s3_region=config.data.s3_region,
@@ -80,9 +99,9 @@ def build_obs_index(config_yaml: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@task(cache=True, cache_version="1", requests=Resources(cpu="0.5", mem="512Mi"))
+@task(cache=Cache(version="2"), requests=Resources(cpu="0.5", mem="512Mi"))
 def build_det_work_items(
-    config_yaml: str,
+    config_content: str,
     obs_index_dict: dict,
 ) -> list[dict]:
     """Enumerate all (obs_id, dither, ccd) DET files into a flat work-item list.
@@ -91,7 +110,7 @@ def build_det_work_items(
     of parallelism for ``read_det_footprints``.
 
     Args:
-        config_yaml: Path to the pipeline config YAML (unused directly,
+        config_content: Pipeline config as YAML string (unused directly,
             but needed for Flyte lineage).
         obs_index_dict: Serialized ObservationIndex from build_obs_index.
 
@@ -131,7 +150,7 @@ def build_det_work_items(
     return work_items
 
 
-@task(cache=True, cache_version="2", requests=Resources(cpu="0.5", mem="512Mi"))
+@task(cache=Cache(version="2"), requests=Resources(cpu="0.5", mem="512Mi"))
 def read_det_footprints(
     work_item: dict,
 ) -> FlyteFile:
@@ -142,7 +161,7 @@ def read_det_footprints(
 
     Returns a FlyteFile (JSON) rather than a list[dict] so that the
     map_task output stays under Flyte's 2 MB protobuf metadata limit
-    (~840 tasks × ~72 quadrants = ~60K footprints would exceed it).
+    (~840 tasks x ~72 quadrants = ~60K footprints would exceed it).
 
     Args:
         work_item: Dict with det_path, bkg_path, wgt_path, psf_path,
@@ -206,7 +225,7 @@ def read_det_footprints(
     return FlyteFile(out_path)
 
 
-@task(cache=True, cache_version="2", requests=Resources(cpu="0.5", mem="1Gi"))
+@task(cache=Cache(version="2"), requests=Resources(cpu="0.5", mem="1Gi"))
 def merge_footprints(
     footprint_files: list[FlyteFile],
 ) -> FlyteFile:
@@ -239,224 +258,98 @@ def merge_footprints(
 
 
 # ---------------------------------------------------------------------------
-# Legacy single-task quadrant index (kept for local/testing use)
+# Combined tile preparation + sub-tile extraction
 # ---------------------------------------------------------------------------
 
 
-@task(cache=True, cache_version="1")
-def build_quadrant_index_task(
-    config_yaml: str,
-    obs_index_dict: dict,
-) -> list[dict]:
-    """Build the quadrant spatial index by reading WCS from FITS headers.
-
-    Args:
-        config_yaml: Path to the pipeline config YAML.
-        obs_index_dict: Serialized ObservationIndex from build_obs_index.
-
-    Returns:
-        Serialized quadrant index (list of dicts).
-    """
-    config = PipelineConfig.from_yaml(config_yaml)
-    obs_index = ObservationIndex.from_dict(obs_index_dict)
-    index = build_quadrant_index(
-        obs_index,
-        s3_anon=config.data.s3_no_sign_request,
-    )
-    return quadrant_index_to_dict(index)
-
-
-# ---------------------------------------------------------------------------
-# Tile preparation
-# ---------------------------------------------------------------------------
-
-
-@task(cache=True, cache_version="4")
-def prepare_tile(
+@task(
+    cache=Cache(version="4", ignored_inputs=("run_id",)),
+    requests=Resources(cpu="1", mem="1Gi"),
+    retries=1,
+)
+def prepare_and_extract_tile(
     tile_id: int,
-    config_yaml: str,
+    config_content: str,
     obs_index_dict: dict,
-    quadrant_index_file: FlyteFile | None = None,
+    quadrant_index_file: FlyteFile,
     run_id: str = "",
-) -> list[FlyteFile]:
-    """Generate manifests for all sub-tiles of one MER tile.
+) -> dict:
+    """Prepare manifests and extract all sub-tiles for one MER tile.
+
+    Combines the former ``prepare_tile`` and per-sub-tile
+    ``extract_subtile_task`` into a single task. One pod downloads each
+    multi-GB FITS file once via the tile-level ``_cache/`` directory,
+    then extracts all 16 sub-tiles from local data.
+
+    Uses ``Cache(ignored_inputs=("run_id",))`` so re-executions with a
+    different ``run_id`` still hit cache for identical ``(tile_id,
+    config_content, obs_index_dict, quadrant_index_file)`` inputs.
 
     Args:
         tile_id: MER tile ID.
-        config_yaml: Path to the pipeline config YAML.
+        config_content: Pipeline config as YAML content string.
         obs_index_dict: Serialized ObservationIndex from build_obs_index.
         quadrant_index_file: FlyteFile pointing to a JSON quadrant index.
-            If provided, enables WCS-based spatial filtering.
         run_id: Pipeline run identifier for S3 output.
 
     Returns:
-        List of manifest file paths.
+        Summary dict with ``tile_id``, ``n_subtiles``, and ``subtile_dirs``.
     """
-    config = PipelineConfig.from_yaml(config_yaml)
+    config = PipelineConfig.from_yaml_content(config_content)
     obs_index = ObservationIndex.from_dict(obs_index_dict)
 
-    quadrant_index = None
-    if quadrant_index_file is not None:
-        local_path = (
-            quadrant_index_file.download()
-            if hasattr(quadrant_index_file, "download")
-            else str(quadrant_index_file)
-        )
-        with open(local_path) as f:
-            quadrant_index_dict = json.load(f)
-        quadrant_index = quadrant_index_from_dict(quadrant_index_dict)
+    # Load quadrant index from FlyteFile
+    local_path = (
+        quadrant_index_file.download()
+        if hasattr(quadrant_index_file, "download")
+        else str(quadrant_index_file)
+    )
+    with open(local_path) as f:
+        quadrant_index_dict = json.load(f)
+    quadrant_index = quadrant_index_from_dict(quadrant_index_dict)
 
+    # Step 1: Generate manifests for all sub-tiles of this tile
     manifest_paths = write_manifests_for_tile(
         tile_id, config, obs_index, quadrant_index=quadrant_index
     )
 
-    # Upload manifests to S3
-    base = config.output.storage_base_uri
-    if base and run_id:
-        for mp in manifest_paths:
-            tile_id_p, row, col = _parse_subtile_from_manifest_path(mp)
-            prefix = build_subtile_prefix(base, run_id, tile_id_p, row, col)
-            upload_file(mp, f"{prefix}/manifest.yaml")
-
-    return manifest_paths
-
-
-# ---------------------------------------------------------------------------
-# Per-sub-tile extraction and inference
-# ---------------------------------------------------------------------------
-
-
-@task(cache=True, cache_version="3", requests=Resources(cpu="1", mem="1Gi"))
-def extract_subtile_task(
-    manifest_path: FlyteFile,
-    config_yaml: str,
-    run_id: str = "",
-) -> str:
-    """Extract quadrant FITS and catalog subset for one sub-tile.
-
-    Downloads source FITS files, extracts relevant quadrant HDUs,
-    subsets the MER catalog, and writes a self-contained sub-tile
-    directory with relative-path manifest.
-
-    Args:
-        manifest_path: Path to the sub-tile manifest YAML.
-        config_yaml: Path to the pipeline config YAML.
-        run_id: Pipeline run identifier for S3 output.
-
-    Returns:
-        Path to the extracted sub-tile directory.
-    """
-    config = PipelineConfig.from_yaml(config_yaml)
-
-    subtile_dir = extract_subtile(
-        manifest_path,
+    # Step 2: Extract all sub-tiles (shared download cache)
+    subtile_dirs = extract_all_subtiles_for_tile(
+        manifest_paths=manifest_paths,
         extraction_dir=config.output.extraction_dir,
         s3_anon=config.data.s3_no_sign_request,
     )
 
-    # Upload extracted directory to S3
+    # Step 3: Upload to S3 if configured
     base = config.output.storage_base_uri
+    logger.info("storage_base_uri=%r, run_id=%r", base, run_id)
     if base and run_id:
-        tile_id, row, col = _parse_subtile_from_manifest_path(
-            str(manifest_path)
-        )
-        prefix = build_subtile_prefix(base, run_id, tile_id, row, col)
-        upload_directory(subtile_dir, prefix)
+        for mp in manifest_paths:
+            tile_id_p, row, col = _parse_subtile_from_manifest_path(mp)
+            prefix = build_subtile_prefix(base, run_id, tile_id_p, row, col)
+            logger.info("Uploading manifest %s -> %s/manifest.yaml", mp, prefix)
+            upload_file(mp, f"{prefix}/manifest.yaml")
 
-    logger.info("Extracted sub-tile from %s", manifest_path)
-    return subtile_dir
-
-
-@task(
-    cache=True,
-    cache_version="3",
-    requests=Resources(cpu="1", mem="1Gi"),
-    interruptible=True,
-    retries=2,
-)
-def infer_subtile(
-    manifest_path: FlyteFile,
-    config_yaml: str,
-    run_id: str = "",
-    extracted_dir: str = "",
-) -> FlyteFile:
-    """Run inference on a single sub-tile.
-
-    Uses mock SHINE if configured, otherwise would invoke real SHINE.
-
-    Args:
-        manifest_path: Path to the sub-tile manifest YAML.
-        config_yaml: Path to the pipeline config YAML.
-        run_id: Pipeline run identifier for S3 output.
-        extracted_dir: Path to extracted sub-tile directory. Used as a
-            data dependency to ensure extraction completes before
-            inference starts; value is not used by the inference logic.
-
-    Returns:
-        Path to the result Parquet file.
-    """
-    config = PipelineConfig.from_yaml(config_yaml)
-
-    if config.mock_shine:
-        result = run_mock_inference(manifest_path)
+        for sd in subtile_dirs:
+            # Parse tile/row_col from the directory path
+            sd_path = Path(sd)
+            row_col = sd_path.name  # e.g. "0_0"
+            parts = row_col.split("_")
+            row, col = int(parts[0]), int(parts[1])
+            prefix = build_subtile_prefix(base, run_id, tile_id, row, col)
+            logger.info("Uploading subtile dir %s -> %s", sd, prefix)
+            upload_directory(sd, prefix)
     else:
-        raise NotImplementedError(
-            "Real SHINE inference not yet integrated. "
-            "Set mock_shine=true in config."
-        )
+        logger.warning("Skipping S3 upload: base=%r, run_id=%r", base, run_id)
 
-    result_path = write_subtile_result(result, config.output.result_dir)
-
-    # Upload result to S3
-    base = config.output.storage_base_uri
-    if base and run_id:
-        tile_id, row, col = _parse_subtile_from_manifest_path(
-            str(manifest_path)
-        )
-        prefix = build_subtile_prefix(base, run_id, tile_id, row, col)
-        upload_file(result_path, f"{prefix}/result.parquet")
-
-    return result_path
-
-
-# ---------------------------------------------------------------------------
-# Catalog assembly and validation
-# ---------------------------------------------------------------------------
-
-
-@task
-def assemble_results(
-    result_paths: list[FlyteFile],
-    config_yaml: str,
-) -> int:
-    """Merge all sub-tile results into the Iceberg catalog.
-
-    Returns:
-        Number of rows written.
-    """
-    config = PipelineConfig.from_yaml(config_yaml)
-    return assemble_catalog(
-        result_paths,
-        warehouse=config.output.catalog_warehouse,
-        namespace=config.output.catalog_namespace,
-        table_name=config.output.catalog_table,
+    logger.info(
+        "Prepared and extracted tile %d: %d sub-tiles",
+        tile_id,
+        len(subtile_dirs),
     )
 
-
-@task
-def validate_results(
-    config_yaml: str,
-    expected_subtiles: int,
-) -> dict:
-    """Run quality checks on the assembled catalog.
-
-    Returns:
-        Summary statistics dict.
-    """
-    config = PipelineConfig.from_yaml(config_yaml)
-    return validate_catalog(
-        warehouse=config.output.catalog_warehouse,
-        namespace=config.output.catalog_namespace,
-        table_name=config.output.catalog_table,
-        expected_subtiles=expected_subtiles,
-    )
+    return {
+        "tile_id": tile_id,
+        "n_subtiles": len(subtile_dirs),
+        "subtile_dirs": subtile_dirs,
+    }

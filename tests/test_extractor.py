@@ -10,6 +10,7 @@ from astropy.io import fits
 from astropy.table import Table
 
 from constellation.extractor import (
+    extract_all_subtiles_for_tile,
     extract_psf_fits,
     extract_quadrant_fits,
     extract_subtile,
@@ -319,3 +320,119 @@ class TestExtractSubtile:
         assert set(new_manifest.core_source_ids).issubset(
             set(new_manifest.source_ids)
         )
+
+
+class TestExtractAllSubtilesForTile:
+    def test_extracts_multiple_subtiles(
+        self, mock_vis_fits_path, mock_psf_fits_path, mock_catalog_fits_path, tmp_path
+    ):
+        """extract_all_subtiles_for_tile processes multiple manifests for one tile."""
+        qname = MOCK_QUADRANT_NAMES[0]
+        manifests = []
+        manifest_paths = []
+
+        for row, col in [(0, 0), (0, 1)]:
+            manifest = SubTileManifest(
+                tile_id=102018211,
+                sub_tile_row=row,
+                sub_tile_col=col,
+                sky_bounds=SkyBounds(
+                    core_ra=(MOCK_FIELD_RA - 0.05, MOCK_FIELD_RA + 0.05),
+                    core_dec=(MOCK_FIELD_DEC - 0.05, MOCK_FIELD_DEC + 0.05),
+                    extended_ra=(MOCK_FIELD_RA - 0.1, MOCK_FIELD_RA + 0.1),
+                    extended_dec=(MOCK_FIELD_DEC - 0.1, MOCK_FIELD_DEC + 0.1),
+                ),
+                quadrants=[
+                    QuadrantRef(
+                        sci_path=mock_vis_fits_path,
+                        bkg_path=mock_vis_fits_path,
+                        wgt_path=mock_vis_fits_path,
+                        psf_path=mock_psf_fits_path,
+                        quadrant=qname,
+                        obs_id="002681",
+                        dither="00",
+                        ccd="1",
+                    ),
+                ],
+                source_catalog=mock_catalog_fits_path,
+                source_ids=[],
+                core_source_ids=[],
+            )
+            mp = tmp_path / f"102018211_{row}_{col}.yaml"
+            manifest.to_yaml(mp)
+            manifest_paths.append(str(mp))
+
+        extraction_dir = tmp_path / "subtiles"
+        dirs = extract_all_subtiles_for_tile(
+            manifest_paths=manifest_paths,
+            extraction_dir=extraction_dir,
+            s3_anon=False,
+        )
+
+        assert len(dirs) == 2
+        for d in dirs:
+            p = Path(d)
+            assert p.exists()
+            assert (p / "manifest_local.yaml").exists()
+            assert (p / "catalog.fits").exists()
+
+    def test_shared_cache_directory(self, mock_s3_with_fits, tmp_path):
+        """All sub-tiles of one tile share a single _cache/ directory.
+
+        Uses S3 URIs so that _ensure_local creates a download cache.
+        """
+        from tests.conftest import MOCK_CATALOG_FILES, MOCK_VIS_FILES
+
+        qname = MOCK_QUADRANT_NAMES[0]
+        manifest_paths = []
+
+        # Pick S3 paths from the mock data
+        det_path = next(
+            f"s3://nasa-irsa-euclid-q1/{k}" for k in MOCK_VIS_FILES if "DET" in k and "00-1" in k
+        )
+        psf_path = next(
+            f"s3://nasa-irsa-euclid-q1/{k}" for k in MOCK_VIS_FILES if "PSF" in k
+        )
+        catalog_path = f"s3://nasa-irsa-euclid-q1/{MOCK_CATALOG_FILES[0]}"
+
+        for row, col in [(0, 0), (1, 0)]:
+            manifest = SubTileManifest(
+                tile_id=102018211,
+                sub_tile_row=row,
+                sub_tile_col=col,
+                sky_bounds=SkyBounds(
+                    core_ra=(MOCK_FIELD_RA - 0.05, MOCK_FIELD_RA + 0.05),
+                    core_dec=(MOCK_FIELD_DEC - 0.05, MOCK_FIELD_DEC + 0.05),
+                    extended_ra=(MOCK_FIELD_RA - 0.1, MOCK_FIELD_RA + 0.1),
+                    extended_dec=(MOCK_FIELD_DEC - 0.1, MOCK_FIELD_DEC + 0.1),
+                ),
+                quadrants=[
+                    QuadrantRef(
+                        sci_path=det_path,
+                        bkg_path=det_path,
+                        wgt_path=det_path,
+                        psf_path=psf_path,
+                        quadrant=qname,
+                        obs_id="002681",
+                        dither="00",
+                        ccd="1",
+                    ),
+                ],
+                source_catalog=catalog_path,
+                source_ids=[],
+                core_source_ids=[],
+            )
+            mp = tmp_path / f"102018211_{row}_{col}.yaml"
+            manifest.to_yaml(mp)
+            manifest_paths.append(str(mp))
+
+        extraction_dir = tmp_path / "subtiles"
+        extract_all_subtiles_for_tile(
+            manifest_paths=manifest_paths,
+            extraction_dir=extraction_dir,
+            s3_anon=False,
+        )
+
+        # Verify a single _cache/ dir exists at the tile level
+        cache_dir = extraction_dir / "102018211" / "_cache"
+        assert cache_dir.is_dir()

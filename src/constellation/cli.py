@@ -31,12 +31,12 @@ def run(config_yaml: str) -> None:
 
     Submit the workflow using pyflyte or the Flyte console:
 
-        pyflyte run src/constellation/workflows/pipeline.py shear_pipeline \\
+        pyflyte run src/constellation/workflows/pipeline.py data_preparation_pipeline \\
             --config_yaml <config> --tile_ids '[...]'
     """
     click.echo(
         "Use pyflyte to submit the workflow:\n\n"
-        "  pyflyte run src/constellation/workflows/pipeline.py shear_pipeline \\\n"
+        "  pyflyte run src/constellation/workflows/pipeline.py data_preparation_pipeline \\\n"
         f"    --config_yaml {config_yaml} --tile_ids '<tile_ids>'\n",
         err=True,
     )

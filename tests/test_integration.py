@@ -11,21 +11,18 @@ import pytest
 
 from constellation.config import PipelineConfig
 from constellation.workflows.tasks import (
-    assemble_results,
     build_obs_index,
-    infer_subtile,
-    prepare_tile,
-    validate_results,
+    prepare_and_extract_tile,
 )
 
 
 @pytest.mark.integration
 class TestEndToEnd:
-    def test_pipeline_stages_three_tiles(self, mock_s3, tmp_path):
-        """Run pipeline stages sequentially with 3 tiles using moto-mocked S3.
+    def test_prepare_and_extract_three_tiles(self, mock_s3_with_fits, tmp_path):
+        """Run prepare_and_extract_tile for 3 tiles using moto-mocked S3.
 
-        Expected: 3 tiles x 16 sub-tiles = 48 rows in Iceberg.
-        Uses legacy mode (empty FITS files, no WCS headers).
+        Expected: each tile produces 16 sub-tile directories.
+        Uses mock FITS files with valid WCS headers.
         """
         config = PipelineConfig(
             field_name="EDFF_TEST",
@@ -39,49 +36,30 @@ class TestEndToEnd:
             },
             mock_shine=True,
         )
-        config_path = tmp_path / "config.yaml"
-        config.to_yaml(config_path)
-        config_yaml = str(config_path)
+        config_content = config.to_yaml_content()
 
         # Build observation index
-        obs_dict = build_obs_index(config_yaml=config_yaml)
+        obs_dict = build_obs_index(config_content=config_content)
 
-        # Prepare manifests for all tiles
-        all_manifest_paths: list[str] = []
+        # Write an empty quadrant index file (no spatial filtering)
+        import json
+
+        qi_path = tmp_path / "quadrant_index.json"
+        qi_path.write_text(json.dumps([]))
+
+        # Prepare and extract each tile
         for tile_id in config.tile_ids:
-            paths = prepare_tile(
+            result = prepare_and_extract_tile(
                 tile_id=tile_id,
-                config_yaml=config_yaml,
+                config_content=config_content,
                 obs_index_dict=obs_dict,
+                quadrant_index_file=str(qi_path),
             )
-            all_manifest_paths.extend(paths)
+            assert result["tile_id"] == tile_id
+            assert result["n_subtiles"] == 16
 
-        assert len(all_manifest_paths) == 48
-
-        # Infer all sub-tiles
-        result_paths: list[str] = []
-        for mp in all_manifest_paths:
-            rp = infer_subtile(manifest_path=mp, config_yaml=config_yaml)
-            result_paths.append(rp)
-
-        assert len(result_paths) == 48
-
-        # Assemble and validate
-        n_rows = assemble_results(
-            result_paths=result_paths, config_yaml=config_yaml
-        )
-        assert n_rows == 48
-
-        stats = validate_results(
-            config_yaml=config_yaml, expected_subtiles=48
-        )
-        assert stats["row_count"] == 48
-        assert stats["tile_count"] == 3
-        assert stats["completeness"] == 1.0
-        assert abs(stats["g1_mean"]) < 0.1
-
-    def test_pipeline_stages_single_tile(self, mock_s3, tmp_path):
-        """Single tile produces 16 rows."""
+    def test_prepare_and_extract_single_tile(self, mock_s3_with_fits, tmp_path):
+        """Single tile produces 16 sub-tile directories."""
         config = PipelineConfig(
             field_name="EDFF_TEST",
             tile_ids=[102018211],
@@ -94,34 +72,24 @@ class TestEndToEnd:
             },
             mock_shine=True,
         )
-        config_path = tmp_path / "config.yaml"
-        config.to_yaml(config_path)
-        config_yaml = str(config_path)
+        config_content = config.to_yaml_content()
 
-        obs_dict = build_obs_index(config_yaml=config_yaml)
-        manifest_paths = prepare_tile(
+        obs_dict = build_obs_index(config_content=config_content)
+
+        import json
+
+        qi_path = tmp_path / "quadrant_index.json"
+        qi_path.write_text(json.dumps([]))
+
+        result = prepare_and_extract_tile(
             tile_id=102018211,
-            config_yaml=config_yaml,
+            config_content=config_content,
             obs_index_dict=obs_dict,
+            quadrant_index_file=str(qi_path),
         )
-        assert len(manifest_paths) == 16
-
-        result_paths = [
-            infer_subtile(manifest_path=mp, config_yaml=config_yaml)
-            for mp in manifest_paths
-        ]
-
-        n_rows = assemble_results(
-            result_paths=result_paths, config_yaml=config_yaml
-        )
-        assert n_rows == 16
-
-        stats = validate_results(
-            config_yaml=config_yaml, expected_subtiles=16
-        )
-        assert stats["row_count"] == 16
-        assert stats["tile_count"] == 1
-        assert stats["completeness"] == 1.0
+        assert result["tile_id"] == 102018211
+        assert result["n_subtiles"] == 16
+        assert len(result["subtile_dirs"]) == 16
 
 
 @pytest.mark.integration

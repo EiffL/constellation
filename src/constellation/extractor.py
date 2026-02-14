@@ -357,3 +357,40 @@ def extract_subtile(
     )
 
     return str(subtile_dir)
+
+
+def extract_all_subtiles_for_tile(
+    manifest_paths: list[str],
+    extraction_dir: str | Path,
+    s3_anon: bool = True,
+) -> list[str]:
+    """Extract all sub-tiles for one tile, sharing the download cache.
+
+    Calls :func:`extract_subtile` for each manifest. Because all sub-tiles
+    of the same tile share a ``_cache/`` directory under ``extraction_dir/{tile_id}/``,
+    each multi-GB FITS file is downloaded only once — regardless of how many
+    sub-tiles reference it.
+
+    Args:
+        manifest_paths: Paths to sub-tile manifest YAML files (all for the same tile).
+        extraction_dir: Base directory for extracted sub-tile directories.
+        s3_anon: Use anonymous S3 access.
+
+    Returns:
+        List of extracted sub-tile directory paths.
+    """
+    subtile_dirs: list[str] = []
+    for manifest_path in manifest_paths:
+        subtile_dir = extract_subtile(
+            manifest_path=manifest_path,
+            extraction_dir=extraction_dir,
+            s3_anon=s3_anon,
+        )
+        subtile_dirs.append(subtile_dir)
+
+    logger.info(
+        "Extracted %d sub-tiles into %s",
+        len(subtile_dirs),
+        extraction_dir,
+    )
+    return subtile_dirs

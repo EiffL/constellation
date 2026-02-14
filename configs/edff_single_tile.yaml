@@ -6,7 +6,7 @@
 field_name: EDFF
 
 tile_ids:
-  - 102018211
+  - 102019592
 
 tiling:
   sub_tile_grid: [2, 2]
@@ -26,7 +26,7 @@ output:
   result_dir: "/tmp/constellation-results/"
   manifest_dir: "/tmp/constellation-manifests/"
   extraction_dir: "/tmp/constellation-subtiles/"
-  storage_base_uri: ""
+  storage_base_uri: "s3://constellation-pipeline-dev-696356228955"
 
 mock_shine: true
 

@@ -107,11 +107,25 @@ kubectl -n flyte port-forward svc/flyte-backend-flyte-binary-http 8088:8088
 
 ## Step 5 — Register workflows
 
+Fast registration uploads a source tarball to S3 and overlays it on the pre-built base image at runtime. No Docker build needed for code changes — only rebuild the ECR image when dependencies change.
+
 ```bash
 cd ../..   # back to repo root
 uv run pyflyte register src/constellation/workflows/ \
   --project constellation \
-  --domain development
+  --domain development \
+  --image 696356228955.dkr.ecr.us-east-1.amazonaws.com/constellation:latest
+```
+
+To register and run a single-tile workflow in one shot:
+
+```bash
+uv run pyflyte run --remote \
+  --project constellation --domain development \
+  --image 696356228955.dkr.ecr.us-east-1.amazonaws.com/constellation:latest \
+  src/constellation/workflows/pipeline.py data_preparation_pipeline \
+  --config_yaml configs/edff_single_tile.yaml \
+  --tile_ids '[102018211]'
 ```
 
 ## Tear down
