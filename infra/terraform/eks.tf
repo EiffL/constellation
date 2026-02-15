@@ -111,7 +111,7 @@ module "eks" {
     gpu-spot = {
       instance_types = var.gpu_instance_types
       capacity_type  = "SPOT"
-      ami_type       = "AL2_x86_64_GPU"
+      ami_type       = "AL2023_x86_64_NVIDIA"
 
       min_size     = 0
       max_size     = var.gpu_max_nodes
