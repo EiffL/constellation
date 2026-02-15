@@ -73,6 +73,19 @@ module "eks" {
       max_size     = var.cpu_worker_max_nodes
       desired_size = 0
 
+      # 50 GB root volume — tile extraction caches multi-GB FITS files
+      # locally before extracting sub-tile cutouts (see issue #1).
+      block_device_mappings = {
+        xvda = {
+          device_name = "/dev/xvda"
+          ebs = {
+            volume_size           = 50
+            volume_type           = "gp3"
+            delete_on_termination = true
+          }
+        }
+      }
+
       labels = { role = "cpu-worker" }
 
       taints = {

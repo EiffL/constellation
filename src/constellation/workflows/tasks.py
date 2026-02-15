@@ -264,7 +264,7 @@ def merge_footprints(
 
 @task(
     cache=Cache(version="4", ignored_inputs=("run_id",)),
-    requests=Resources(cpu="1", mem="1Gi"),
+    requests=Resources(cpu="1", mem="1Gi", ephemeral_storage="30Gi"),
     retries=1,
 )
 def prepare_and_extract_tile(

@@ -2,11 +2,14 @@ provider "aws" {
   region = var.region
 
   default_tags {
-    tags = {
-      Project     = var.project
-      Environment = var.environment
-      ManagedBy   = "terraform"
-    }
+    tags = merge(
+      {
+        Project     = var.project
+        Environment = var.environment
+        ManagedBy   = "terraform"
+      },
+      var.aws_application_tag != "" ? { awsApplication = var.aws_application_tag } : {},
+    )
   }
 }
 
@@ -42,3 +45,19 @@ locals {
   account_id   = data.aws_caller_identity.current.account_id
   azs          = slice(data.aws_availability_zones.available.names, 0, 2)
 }
+
+# -----------------------------------------------------------------------------
+# AWS myApplications — groups all project resources under a single application
+# in the AWS console for cost tracking and operational visibility.
+# -----------------------------------------------------------------------------
+
+resource "aws_servicecatalogappregistry_application" "this" {
+  name        = var.project
+  description = "Orchestration layer for survey-scale weak lensing shear inference"
+}
+
+import {
+  to = aws_servicecatalogappregistry_application.this
+  id = var.project
+}
+

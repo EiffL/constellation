@@ -23,7 +23,7 @@ variable "region" {
 variable "eks_cluster_version" {
   description = "Kubernetes version for the EKS cluster"
   type        = string
-  default     = "1.31"
+  default     = "1.35"
 }
 
 variable "system_instance_types" {
@@ -54,6 +54,16 @@ variable "cpu_worker_max_nodes" {
   description = "Maximum number of CPU spot nodes for data-prep tasks"
   type        = number
   default     = 10
+}
+
+# ------------------------------------------------------------------------------
+# myApplications (AWS Service Catalog AppRegistry)
+# ------------------------------------------------------------------------------
+
+variable "aws_application_tag" {
+  description = "The awsApplication tag ARN from Service Catalog AppRegistry. Set after the first apply creates the application (see outputs)."
+  type        = string
+  default     = ""
 }
 
 # ------------------------------------------------------------------------------

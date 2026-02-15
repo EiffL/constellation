@@ -6,6 +6,13 @@ output "region" {
   value = var.region
 }
 
+# myApplications -------------------------------------------------------------
+
+output "aws_application_tag" {
+  description = "The awsApplication tag value — set this as the aws_application_tag variable to tag all resources"
+  value       = aws_servicecatalogappregistry_application.this.application_tag
+}
+
 # EKS -----------------------------------------------------------------------
 
 output "eks_cluster_name" {
