@@ -1,7 +1,6 @@
 # EDFF single tile — for quick testing of quadrant resolution + extraction
 #
-# One tile, 2×2 sub-tile grid (4 sub-tiles instead of 16).
-# Uses real S3 data with mock SHINE inference.
+# One tile, 4×4 sub-tile grid.
 
 field_name: EDFF
 
@@ -9,7 +8,7 @@ tile_ids:
   - 102019592
 
 tiling:
-  sub_tile_grid: [2, 2]
+  sub_tile_grid: [4, 4]
   sub_tile_margin_arcmin: 1.0
 
 data:

@@ -1,14 +1,15 @@
 """FITS extraction and catalog subsetting for self-contained sub-tile directories.
 
-Downloads multi-extension VIS FITS files, extracts individual quadrant HDUs
-into small single-quadrant files, subsets the MER catalog to the sub-tile's
-extended area, and rewrites the manifest with relative paths.
+Downloads multi-extension VIS FITS files, extracts quadrant HDUs grouped
+by exposure into consolidated FITS files, subsets the MER catalog to the
+sub-tile's extended area, and rewrites the manifest with relative paths.
 """
 
 from __future__ import annotations
 
 import logging
 import shutil
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -82,27 +83,46 @@ def extract_quadrant_fits(
         quadrant_name: Quadrant HDU prefix (e.g. ``"3-4.F"``).
         dest_path: Output path for the extracted FITS file.
     """
+    extract_quadrants_fits(src_path, [quadrant_name], dest_path)
+
+
+def extract_quadrants_fits(
+    src_path: str | Path,
+    quadrant_names: list[str],
+    dest_path: str | Path,
+) -> None:
+    """Extract multiple quadrants' HDUs from a multi-extension FITS file.
+
+    Copies the ``{quadrant}.SCI``, ``.RMS``, and ``.FLG`` extensions for
+    each quadrant into a single consolidated FITS file at ``dest_path``.
+
+    Args:
+        src_path: Path to the multi-extension FITS file.
+        quadrant_names: Quadrant HDU prefixes (e.g. ``["3-4.F", "3-5.E"]``).
+        dest_path: Output path for the extracted FITS file.
+    """
     dest_path = Path(dest_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
     suffixes = [".SCI", ".RMS", ".FLG"]
-    hdu_names = [f"{quadrant_name}{s}" for s in suffixes]
 
     with fits.open(str(src_path)) as hdul:
         new_hdul = fits.HDUList([fits.PrimaryHDU()])
-        for name in hdu_names:
-            try:
-                ext = hdul[name]
-                new_hdu = fits.ImageHDU(
-                    data=ext.data,
-                    header=ext.header,
-                    name=name,
-                )
-                new_hdul.append(new_hdu)
-            except KeyError:
-                logger.warning(
-                    "HDU %s not found in %s, skipping", name, src_path
-                )
+        for qname in quadrant_names:
+            for suffix in suffixes:
+                hdu_name = f"{qname}{suffix}"
+                try:
+                    ext = hdul[hdu_name]
+                    new_hdu = fits.ImageHDU(
+                        data=ext.data,
+                        header=ext.header,
+                        name=hdu_name,
+                    )
+                    new_hdul.append(new_hdu)
+                except KeyError:
+                    logger.warning(
+                        "HDU %s not found in %s, skipping", hdu_name, src_path
+                    )
         new_hdul.writeto(str(dest_path), overwrite=True)
 
 
@@ -118,23 +138,39 @@ def extract_psf_fits(
         quadrant_name: Quadrant HDU name (e.g. ``"3-4.F"``).
         dest_path: Output path for the extracted PSF FITS file.
     """
+    extract_psfs_fits(src_path, [quadrant_name], dest_path)
+
+
+def extract_psfs_fits(
+    src_path: str | Path,
+    quadrant_names: list[str],
+    dest_path: str | Path,
+) -> None:
+    """Extract multiple quadrants' PSF extensions from a PSF grid FITS file.
+
+    Args:
+        src_path: Path to the PSF grid FITS file.
+        quadrant_names: Quadrant HDU names (e.g. ``["3-4.F", "3-5.E"]``).
+        dest_path: Output path for the extracted PSF FITS file.
+    """
     dest_path = Path(dest_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
     with fits.open(str(src_path)) as hdul:
         new_hdul = fits.HDUList([fits.PrimaryHDU()])
-        try:
-            ext = hdul[quadrant_name]
-            new_hdu = fits.ImageHDU(
-                data=ext.data,
-                header=ext.header,
-                name=quadrant_name,
-            )
-            new_hdul.append(new_hdu)
-        except KeyError:
-            logger.warning(
-                "PSF HDU %s not found in %s", quadrant_name, src_path
-            )
+        for qname in quadrant_names:
+            try:
+                ext = hdul[qname]
+                new_hdu = fits.ImageHDU(
+                    data=ext.data,
+                    header=ext.header,
+                    name=qname,
+                )
+                new_hdul.append(new_hdu)
+            except KeyError:
+                logger.warning(
+                    "PSF HDU %s not found in %s", qname, src_path
+                )
         new_hdul.writeto(str(dest_path), overwrite=True)
 
 
@@ -218,6 +254,11 @@ def subset_catalog(
     return all_ids, core_ids
 
 
+def _exposure_key(obs_id: str, dither: str, ccd: str) -> str:
+    """Build a filesystem-safe key for an exposure."""
+    return f"{obs_id}_{dither}_{ccd}"
+
+
 def extract_subtile(
     manifest_path: str | Path,
     extraction_dir: str | Path,
@@ -226,8 +267,8 @@ def extract_subtile(
     """Extract all data for one sub-tile into a self-contained directory.
 
     Reads the manifest, downloads and extracts the relevant quadrant HDUs
-    from each FITS file, subsets the catalog, and rewrites the manifest
-    with relative paths.
+    from each FITS file (consolidated per exposure), subsets the catalog,
+    and rewrites the manifest with relative paths.
 
     Args:
         manifest_path: Path to the sub-tile manifest YAML.
@@ -256,59 +297,55 @@ def extract_subtile(
     # Tile-level cache for downloaded source files
     cache_dir = extraction_dir / str(manifest.tile_id) / "_cache"
 
+    # Group quadrants by exposure (obs_id, dither, ccd)
+    exposure_groups: dict[str, list[QuadrantRef]] = defaultdict(list)
+    for qref in manifest.quadrants:
+        ekey = _exposure_key(qref.obs_id, qref.dither, qref.ccd)
+        exposure_groups[ekey].append(qref)
+
     # Track new quadrant refs with relative paths
     new_quadrants: list[QuadrantRef] = []
 
-    for qref in manifest.quadrants:
-        qname = qref.quadrant
-        # Build filename stem: {obs}_{dither}_{ccd}_{quadrant}
-        safe_qname = qname.replace("-", "").replace(".", "")
-        stem = f"{qref.obs_id}_{qref.dither}_{qref.ccd}_{safe_qname}"
+    for ekey, qrefs in exposure_groups.items():
+        quadrant_names = [q.quadrant for q in qrefs]
+        first = qrefs[0]
 
-        # Extract science (DET) quadrant
-        sci_rel = f"exposures/{stem}_sci.fits"
-        if qref.sci_path:
-            local_sci = _ensure_local(qref.sci_path, cache_dir, anon=s3_anon)
-            extract_quadrant_fits(local_sci, qname, subtile_dir / sci_rel)
-        else:
-            sci_rel = ""
+        # Consolidated paths — one FITS per exposure per type
+        sci_rel = f"exposures/{ekey}_sci.fits" if first.sci_path else ""
+        bkg_rel = f"exposures/{ekey}_bkg.fits" if first.bkg_path else ""
+        wgt_rel = f"exposures/{ekey}_wgt.fits" if first.wgt_path else ""
+        psf_rel = f"psf/{ekey}_psf.fits" if first.psf_path else ""
 
-        # Extract background (BKG) quadrant
-        bkg_rel = f"exposures/{stem}_bkg.fits"
-        if qref.bkg_path:
-            local_bkg = _ensure_local(qref.bkg_path, cache_dir, anon=s3_anon)
-            extract_quadrant_fits(local_bkg, qname, subtile_dir / bkg_rel)
-        else:
-            bkg_rel = ""
+        if first.sci_path:
+            local_sci = _ensure_local(first.sci_path, cache_dir, anon=s3_anon)
+            extract_quadrants_fits(local_sci, quadrant_names, subtile_dir / sci_rel)
 
-        # Extract weight (WGT) quadrant
-        wgt_rel = f"exposures/{stem}_wgt.fits"
-        if qref.wgt_path:
-            local_wgt = _ensure_local(qref.wgt_path, cache_dir, anon=s3_anon)
-            extract_quadrant_fits(local_wgt, qname, subtile_dir / wgt_rel)
-        else:
-            wgt_rel = ""
+        if first.bkg_path:
+            local_bkg = _ensure_local(first.bkg_path, cache_dir, anon=s3_anon)
+            extract_quadrants_fits(local_bkg, quadrant_names, subtile_dir / bkg_rel)
 
-        # Extract PSF
-        psf_rel = f"psf/{qref.obs_id}_{safe_qname}_psf.fits"
-        if qref.psf_path:
-            local_psf = _ensure_local(qref.psf_path, cache_dir, anon=s3_anon)
-            extract_psf_fits(local_psf, qname, subtile_dir / psf_rel)
-        else:
-            psf_rel = ""
+        if first.wgt_path:
+            local_wgt = _ensure_local(first.wgt_path, cache_dir, anon=s3_anon)
+            extract_quadrants_fits(local_wgt, quadrant_names, subtile_dir / wgt_rel)
 
-        new_quadrants.append(
-            QuadrantRef(
-                sci_path=sci_rel,
-                bkg_path=bkg_rel,
-                wgt_path=wgt_rel,
-                psf_path=psf_rel,
-                quadrant=qname,
-                obs_id=qref.obs_id,
-                dither=qref.dither,
-                ccd=qref.ccd,
+        if first.psf_path:
+            local_psf = _ensure_local(first.psf_path, cache_dir, anon=s3_anon)
+            extract_psfs_fits(local_psf, quadrant_names, subtile_dir / psf_rel)
+
+        # All quadrants in this exposure share the same file paths
+        for qref in qrefs:
+            new_quadrants.append(
+                QuadrantRef(
+                    sci_path=sci_rel,
+                    bkg_path=bkg_rel,
+                    wgt_path=wgt_rel,
+                    psf_path=psf_rel,
+                    quadrant=qref.quadrant,
+                    obs_id=qref.obs_id,
+                    dither=qref.dither,
+                    ccd=qref.ccd,
+                )
             )
-        )
 
     # Subset catalog
     catalog_rel = "catalog.fits"
@@ -364,12 +401,15 @@ def extract_all_subtiles_for_tile(
     extraction_dir: str | Path,
     s3_anon: bool = True,
 ) -> list[str]:
-    """Extract all sub-tiles for one tile, sharing the download cache.
+    """Extract all sub-tiles for one tile, streaming one source file at a time.
 
-    Calls :func:`extract_subtile` for each manifest. Because all sub-tiles
-    of the same tile share a ``_cache/`` directory under ``extraction_dir/{tile_id}/``,
-    each multi-GB FITS file is downloaded only once — regardless of how many
-    sub-tiles reference it.
+    Consolidates quadrant HDUs by exposure — all quadrants from the same
+    ``(obs_id, dither, ccd)`` for a given sub-tile go into one FITS file
+    per type (sci, bkg, wgt, psf). This dramatically reduces file count.
+
+    Streams source files one at a time: download -> extract all sub-tile
+    quadrants from it -> delete. Caps peak disk at ~1 source file (~7 GB)
+    plus the extracted output.
 
     Args:
         manifest_paths: Paths to sub-tile manifest YAML files (all for the same tile).
@@ -379,14 +419,178 @@ def extract_all_subtiles_for_tile(
     Returns:
         List of extracted sub-tile directory paths.
     """
-    subtile_dirs: list[str] = []
+    from dataclasses import dataclass
+
+    extraction_dir = Path(extraction_dir)
+
+    @dataclass
+    class _SubTileState:
+        """Accumulated state for one sub-tile during streaming extraction."""
+
+        manifest: SubTileManifest
+        subtile_dir: Path
+
+    # --- Step 1: Parse all manifests, set up directories, build index ---
+
+    # Per-sub-tile state keyed by (row, col)
+    states: dict[tuple[int, int], _SubTileState] = {}
+    # (row, col) -> list of QuadrantRef templates
+    quadrant_templates: dict[tuple[int, int], list[dict]] = defaultdict(list)
+    # source_path -> {dest_path: (list[quadrant_names], is_psf)}
+    source_index: dict[str, dict[Path, tuple[list[str], bool]]] = defaultdict(dict)
+
+    tile_id: int | None = None
+
     for manifest_path in manifest_paths:
-        subtile_dir = extract_subtile(
-            manifest_path=manifest_path,
-            extraction_dir=extraction_dir,
-            s3_anon=s3_anon,
+        manifest = SubTileManifest.from_yaml(manifest_path)
+        tile_id = manifest.tile_id
+        key = (manifest.sub_tile_row, manifest.sub_tile_col)
+
+        subtile_dir = (
+            extraction_dir
+            / str(manifest.tile_id)
+            / f"{manifest.sub_tile_row}_{manifest.sub_tile_col}"
         )
-        subtile_dirs.append(subtile_dir)
+        subtile_dir.mkdir(parents=True, exist_ok=True)
+        (subtile_dir / "exposures").mkdir(exist_ok=True)
+        (subtile_dir / "psf").mkdir(exist_ok=True)
+
+        states[key] = _SubTileState(manifest=manifest, subtile_dir=subtile_dir)
+
+        # Group quadrants by exposure within this sub-tile
+        exposure_groups: dict[str, list[QuadrantRef]] = defaultdict(list)
+        for qref in manifest.quadrants:
+            ekey = _exposure_key(qref.obs_id, qref.dither, qref.ccd)
+            exposure_groups[ekey].append(qref)
+
+        for ekey, qrefs in exposure_groups.items():
+            quadrant_names = [q.quadrant for q in qrefs]
+            first = qrefs[0]
+
+            # Consolidated paths — one FITS per exposure per type
+            sci_rel = f"exposures/{ekey}_sci.fits" if first.sci_path else ""
+            bkg_rel = f"exposures/{ekey}_bkg.fits" if first.bkg_path else ""
+            wgt_rel = f"exposures/{ekey}_wgt.fits" if first.wgt_path else ""
+            psf_rel = f"psf/{ekey}_psf.fits" if first.psf_path else ""
+
+            # Register consolidated extraction jobs in source_index
+            if first.sci_path:
+                dest = subtile_dir / sci_rel
+                source_index[first.sci_path][dest] = (quadrant_names, False)
+            if first.bkg_path:
+                dest = subtile_dir / bkg_rel
+                source_index[first.bkg_path][dest] = (quadrant_names, False)
+            if first.wgt_path:
+                dest = subtile_dir / wgt_rel
+                source_index[first.wgt_path][dest] = (quadrant_names, False)
+            if first.psf_path:
+                dest = subtile_dir / psf_rel
+                source_index[first.psf_path][dest] = (quadrant_names, True)
+
+            # Build QuadrantRef templates for the manifest
+            for qref in qrefs:
+                quadrant_templates[key].append(
+                    {
+                        "sci_path": sci_rel,
+                        "bkg_path": bkg_rel,
+                        "wgt_path": wgt_rel,
+                        "psf_path": psf_rel,
+                        "quadrant": qref.quadrant,
+                        "obs_id": qref.obs_id,
+                        "dither": qref.dither,
+                        "ccd": qref.ccd,
+                    }
+                )
+
+    # Tile-level cache for downloaded source files
+    cache_dir = extraction_dir / str(tile_id) / "_cache"
+
+    # --- Step 2: Stream source files one at a time ---
+
+    for src_path, jobs_by_dest in source_index.items():
+        local_path = _ensure_local(src_path, cache_dir, anon=s3_anon)
+
+        for dest_path, (quadrant_names, is_psf) in jobs_by_dest.items():
+            if is_psf:
+                extract_psfs_fits(local_path, quadrant_names, dest_path)
+            else:
+                extract_quadrants_fits(local_path, quadrant_names, dest_path)
+
+        # Delete the cached file immediately after all extractions
+        if local_path.is_relative_to(cache_dir) and local_path.exists():
+            local_path.unlink()
+            logger.info("Deleted cached file %s", local_path)
+
+    # --- Step 3: Subset catalogs and write manifests ---
+
+    subtile_dirs: list[str] = []
+
+    for key, state in states.items():
+        manifest = state.manifest
+        subtile_dir = state.subtile_dir
+
+        # Subset catalog (catalogs are small, no streaming needed)
+        catalog_rel = "catalog.fits"
+        source_ids: list[int] = []
+        core_source_ids: list[int] = []
+
+        if manifest.source_catalog:
+            local_catalog = _ensure_local(
+                manifest.source_catalog, cache_dir, anon=s3_anon
+            )
+            source_ids, core_source_ids = subset_catalog(
+                local_catalog,
+                sky_bounds_extended=(
+                    manifest.sky_bounds.extended_ra,
+                    manifest.sky_bounds.extended_dec,
+                ),
+                sky_bounds_core=(
+                    manifest.sky_bounds.core_ra,
+                    manifest.sky_bounds.core_dec,
+                ),
+                dest_path=subtile_dir / catalog_rel,
+            )
+            # Delete cached catalog after use
+            if local_catalog.is_relative_to(cache_dir) and local_catalog.exists():
+                local_catalog.unlink()
+                logger.info("Deleted cached catalog %s", local_catalog)
+        else:
+            logger.warning("No source catalog in manifest, skipping subset")
+
+        # Build QuadrantRef list from templates
+        new_quadrants = [
+            QuadrantRef(**tmpl) for tmpl in quadrant_templates[key]
+        ]
+
+        # Write updated manifest with relative paths
+        new_manifest = SubTileManifest(
+            tile_id=manifest.tile_id,
+            sub_tile_row=manifest.sub_tile_row,
+            sub_tile_col=manifest.sub_tile_col,
+            sky_bounds=manifest.sky_bounds,
+            quadrants=new_quadrants,
+            source_catalog=catalog_rel,
+            source_ids=source_ids,
+            core_source_ids=core_source_ids,
+        )
+        new_manifest.to_yaml(subtile_dir / "manifest_local.yaml")
+
+        logger.info(
+            "Extracted sub-tile %d/%d_%d: %d quadrants, %d sources",
+            manifest.tile_id,
+            manifest.sub_tile_row,
+            manifest.sub_tile_col,
+            len(new_quadrants),
+            len(source_ids),
+        )
+
+        subtile_dirs.append(str(subtile_dir))
+
+    # --- Step 4: Clean up cache directory ---
+
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
+        logger.info("Cleaned up cache directory %s", cache_dir)
 
     logger.info(
         "Extracted %d sub-tiles into %s",

@@ -89,31 +89,59 @@ def upload_directory(
     local_dir: str | Path,
     s3_uri_prefix: str,
     skip_existing: bool = True,
+    max_workers: int = 10,
 ) -> int:
-    """Recursively upload a directory tree to S3.
+    """Recursively upload a directory tree to S3 with concurrent uploads.
 
     Args:
         local_dir: Local directory to upload.
         s3_uri_prefix: S3 URI prefix (e.g. ``s3://bucket/run/tile/0_0``).
         skip_existing: If True, skip files that already exist on S3.
+        max_workers: Maximum number of concurrent upload threads.
 
     Returns:
         Number of files uploaded (not skipped).
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     local_dir = Path(local_dir)
     s3_uri_prefix = s3_uri_prefix.rstrip("/")
-    uploaded = 0
+    bucket, base_key = _parse_s3_uri(s3_uri_prefix)
 
-    for path in sorted(local_dir.rglob("*")):
-        if path.is_dir():
-            continue
-        rel = path.relative_to(local_dir)
-        dest_uri = f"{s3_uri_prefix}/{rel}"
-        if upload_file(path, dest_uri, skip_existing=skip_existing):
-            uploaded += 1
+    # Collect all files to upload
+    files = [
+        (path, f"{base_key}/{path.relative_to(local_dir)}")
+        for path in sorted(local_dir.rglob("*"))
+        if not path.is_dir()
+    ]
 
+    if not files:
+        return 0
+
+    # Single client shared across threads (boto3 clients are thread-safe)
+    s3 = boto3.client("s3")
+
+    def _upload_one(item: tuple[Path, str]) -> bool:
+        local_path, key = item
+        if skip_existing:
+            try:
+                s3.head_object(Bucket=bucket, Key=key)
+                return False
+            except ClientError:
+                pass
+        s3.upload_file(str(local_path), bucket, key)
+        return True
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        results = list(pool.map(_upload_one, files))
+
+    uploaded = sum(results)
     logger.info(
-        "Uploaded %d files from %s to %s", uploaded, local_dir, s3_uri_prefix
+        "Uploaded %d/%d files from %s to %s",
+        uploaded,
+        len(files),
+        local_dir,
+        s3_uri_prefix,
     )
     return uploaded
 

@@ -12,7 +12,9 @@ from astropy.table import Table
 from constellation.extractor import (
     extract_all_subtiles_for_tile,
     extract_psf_fits,
+    extract_psfs_fits,
     extract_quadrant_fits,
+    extract_quadrants_fits,
     extract_subtile,
     subset_catalog,
 )
@@ -208,11 +210,11 @@ class TestExtractSubtile:
         assert (subtile_path / "exposures").is_dir()
         assert (subtile_path / "psf").is_dir()
 
-        # Check that exposure files exist
+        # Check that exposure files exist (consolidated: 1 sci + 1 bkg + 1 wgt per exposure)
         exposure_files = list((subtile_path / "exposures").glob("*.fits"))
-        assert len(exposure_files) == 3  # sci, bkg, wgt
+        assert len(exposure_files) == 3  # sci, bkg, wgt for the one exposure
 
-        # Check that PSF files exist
+        # Check that PSF files exist (1 per exposure)
         psf_files = list((subtile_path / "psf").glob("*.fits"))
         assert len(psf_files) == 1
 
@@ -270,6 +272,9 @@ class TestExtractSubtile:
             # Should not contain absolute paths or s3:// URIs
             assert not qref.sci_path.startswith("/")
             assert not qref.sci_path.startswith("s3://")
+            # Consolidated: path is per-exposure, not per-quadrant
+            assert "_sci.fits" in qref.sci_path
+            assert "_psf.fits" in qref.psf_path
 
     def test_source_ids_populated(
         self, mock_vis_fits_path, mock_psf_fits_path, mock_catalog_fits_path, tmp_path
@@ -376,10 +381,11 @@ class TestExtractAllSubtilesForTile:
             assert (p / "manifest_local.yaml").exists()
             assert (p / "catalog.fits").exists()
 
-    def test_shared_cache_directory(self, mock_s3_with_fits, tmp_path):
-        """All sub-tiles of one tile share a single _cache/ directory.
+    def test_cache_cleaned_up_after_extraction(self, mock_s3_with_fits, tmp_path):
+        """Cache directory is cleaned up after streaming extraction.
 
-        Uses S3 URIs so that _ensure_local creates a download cache.
+        Uses S3 URIs so that _ensure_local creates a download cache,
+        then verifies the cache is removed after extraction completes.
         """
         from tests.conftest import MOCK_CATALOG_FILES, MOCK_VIS_FILES
 
@@ -427,12 +433,19 @@ class TestExtractAllSubtilesForTile:
             manifest_paths.append(str(mp))
 
         extraction_dir = tmp_path / "subtiles"
-        extract_all_subtiles_for_tile(
+        dirs = extract_all_subtiles_for_tile(
             manifest_paths=manifest_paths,
             extraction_dir=extraction_dir,
             s3_anon=False,
         )
 
-        # Verify a single _cache/ dir exists at the tile level
+        # Verify the _cache/ directory was cleaned up
         cache_dir = extraction_dir / "102018211" / "_cache"
-        assert cache_dir.is_dir()
+        assert not cache_dir.exists()
+
+        # Verify extracted data is still present
+        for d in dirs:
+            p = Path(d)
+            assert p.exists()
+            assert (p / "manifest_local.yaml").exists()
+            assert (p / "catalog.fits").exists()
