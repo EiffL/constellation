@@ -11,11 +11,12 @@ with the Euclid Q1 data in `s3://nasa-irsa-euclid-q1`).
 | S3 VPC gateway endpoint | Free S3 traffic | $0 |
 | EKS cluster | Kubernetes control plane | ~$73/mo |
 | System node group (1× t3.small) | Flyte control plane | ~$15/mo |
-| CPU worker node group (0–N× t3a.medium spot) | Data prep tasks | ~$0.008/hr per node |
-| GPU node group (0–N× g6.xlarge spot) | SHINE inference | ~$0.25/hr per node |
+| CPU worker node group (0–N× t3a.medium spot, 50 GB gp3) | Data prep tasks | ~$0.014/hr per node |
+| GPU node group (0–N× g6.xlarge spot, AL2023 NVIDIA) | SHINE inference | ~$0.25/hr per node |
 | RDS PostgreSQL (db.t4g.micro) | Flyte metadata | $0 (free tier) |
 | S3 buckets (×2) | Flyte artifacts + pipeline data | ~$0 |
 | KMS key | EKS secrets encryption | ~$1/mo |
+| AppRegistry application | AWS myApplications grouping | $0 |
 | NVIDIA device plugin | GPU scheduling | — |
 | Cluster Autoscaler | Scale worker nodes 0→N | — |
 
@@ -44,6 +45,28 @@ Edit `terraform.tfvars`:
 terraform init
 terraform plan        # review what will be created
 terraform apply       # ~15 min for EKS
+```
+
+## Step 1b — Enable myApplications tagging
+
+The first apply creates an AWS AppRegistry application and outputs its tag
+ARN. To tag all resources under this application in the AWS console:
+
+```bash
+# Grab the application tag ARN from the apply output
+terraform output aws_application_tag
+```
+
+Copy the `awsApplication` ARN value and add it to `terraform.tfvars`:
+
+```hcl
+aws_application_tag = "arn:aws:resource-groups:us-east-1:<ACCOUNT_ID>:group/constellation/<APP_ID>"
+```
+
+Then apply again to propagate the tag to all resources:
+
+```bash
+terraform apply
 ```
 
 ## Step 2 — Configure kubectl
@@ -110,6 +133,9 @@ kubectl -n flyte port-forward svc/flyte-backend-flyte-binary-http 8088:8088
 Fast registration uploads a source tarball to S3 and overlays it on the pre-built base image at runtime. No Docker build needed for code changes — only rebuild the ECR image when dependencies change.
 
 ```bash
+# Port-forward Flyte gRPC (if not already running)
+kubectl -n flyte port-forward svc/flyte-backend-flyte-binary-grpc 8089:8089 &
+
 cd ../..   # back to repo root
 uv run pyflyte register src/constellation/workflows/ \
   --project constellation \
